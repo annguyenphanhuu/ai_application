@@ -106,92 +106,71 @@ jobs:
 ---
 
 ### Phase 2: Big Data Ingestion & ETL Pipeline
-**Mục tiêu**: Thu thập, làm sạch và chuẩn bị dữ liệu sản phẩm từ tệp raw (JSON/CSV) lưu trữ vào Delta Lake để phục vụ cho các bước sau.
+**Mục tiêu**: Xây dựng pipeline ingest dữ liệu sản phẩm/review có thể chạy được cả local Spark và Databricks, chuẩn hóa dữ liệu thô thành bảng sản phẩm sạch để phục vụ huấn luyện model, semantic search và API ở các phase sau.
 
 *   **Công nghệ sử dụng**: Apache Spark (Databricks) & Apache Airflow.
 *   **Các bước thực hiện**:
-    1. Viết Spark Job xử lý dữ liệu thô (Amazon dataset): chuẩn hóa văn bản, lọc giá trị rỗng, tính điểm đánh giá trung bình.
-    2. Lưu trữ dữ liệu dạng Delta Table trên Databricks để hỗ trợ tính năng ACID transactions và Time Travel.
-    3. Tạo Apache Airflow DAG để lập lịch chạy Spark Job này hàng ngày (Daily ETL).
+    1. Viết Spark ETL job nhận tham số input/output qua CLI hoặc biến môi trường, hỗ trợ JSON/JSONL/CSV/Parquet để dễ chạy local và chuyển sang Databricks.
+    2. Chuẩn hóa schema sản phẩm: `product_id`, `title`, `description`, `brand`, `category`, `price`, `price_tier`, đồng thời lọc bản ghi thiếu khóa chính hoặc dữ liệu không hợp lệ.
+    3. Nếu có dữ liệu review, aggregate `avg_rating` và `review_count` theo sản phẩm để chuẩn bị feature cho Phase 3.
+    4. Ghi output dạng Delta Table khi chạy trên Databricks/local có Delta; có thể đổi sang Parquet cho môi trường dev nhẹ hơn.
+    5. Tạo Apache Airflow DAG lập lịch Daily ETL, truyền tham số vào Databricks job qua biến môi trường thay vì hard-code cluster/path trong code.
 
 #### Code Minh Họa: Spark ETL Job (`jobs/spark_etl.py`)
 ```python
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, when, coalesce, lit
-
-def run_etl():
-    spark = SparkSession.builder \
-        .appName("SmartShop-Data-Processing") \
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
-        .getOrCreate()
-
-    # 1. Đọc dữ liệu Amazon Metadata raw
-    raw_df = spark.read.json("dbfs:/mnt/raw-data/amazon_products_raw.json")
-
-    # 2. Cleaning & Feature Engineering
-    cleaned_df = raw_df.select(
-        col("asin").alias("product_id"),
-        coalesce(col("title"), lit("Unknown")).alias("title"),
-        coalesce(col("description"), lit("No description available.")).alias("description"),
-        col("price").cast("float").alias("price"),
-        col("brand"),
-        col("category")
-    ).filter(col("product_id").isNotNull())
-
-    # Tính toán thêm cột phân loại giá (Feature Engineering)
-    processed_df = cleaned_df.withColumn(
-        "price_tier",
-        when(col("price") < 20, "Budget")
-        .when((col("price") >= 20) & (col("price") < 100), "Mid-range")
-        .otherwise("Premium")
-    )
-
-    # 3. Ghi vào Delta Lake
-    processed_df.write \
-        .format("delta") \
-        .mode("overwrite") \
-        .save("dbfs:/mnt/processed-data/products_delta")
-
-    print("Spark ETL Job Completed Successfully!")
+from jobs.spark_etl import parse_args, run_etl
 
 if __name__ == "__main__":
-    run_etl()
+    run_etl(parse_args())
 ```
 
 #### Code Minh Họa: Airflow DAG (`dags/etl_scheduler.py`)
 ```python
-from datetime import datetime, timedelta
-from airflow import DAG
-from airflow.providers.databricks.operators.databricks import DatabricksSubmitRunOperator
+from dags.etl_scheduler import dag
+```
 
-default_args = {
-    'owner': 'ai-engineer',
-    'depends_on_past': False,
-    'email_on_failure': False,
-    'retries': 1,
-    'retry_delay': timedelta(minutes=5),
-}
+> Triển khai thật nằm trong `jobs/spark_etl.py` và `dags/etl_scheduler.py`; roadmap chỉ giữ snippet ngắn để tránh tài liệu bị lệch khỏi code khi pipeline phát triển.
 
-with DAG(
-    'smartshop_daily_etl',
-    default_args=default_args,
-    description='Daily ingestion & cleaning pipeline for Amazon products',
-    schedule_interval=timedelta(days=1),
-    start_date=datetime(2026, 7, 1),
-    catchup=False,
-) as dag:
+#### Ghi Chú Chạy Phase 2 Bằng Ubuntu WSL Trên Windows
 
-    # Trigger job chạy Spark trên Databricks Cluster
-    run_spark_etl = DatabricksSubmitRunOperator(
-        task_id='run_spark_etl_job',
-        existing_cluster_id='0706-spark-cluster-id',
-        spark_python_task={
-            'python_file': 'dbfs:/scripts/spark_etl.py'
-        }
-    )
+Spark local trên Windows có thể gặp lỗi `HADOOP_HOME` / `winutils.exe`. Cách đơn giản hơn là chạy Phase 2 trong Ubuntu WSL:
 
-    run_spark_etl
+```powershell
+wsl -d Ubuntu
+```
+
+Trong Ubuntu, đi tới project trên ổ `D:`:
+
+```bash
+cd /mnt/d/ANNGUYEN/Project/AI_Application
+```
+
+Cài Java và tạo virtual environment. Không nên tạo `.venv` trực tiếp trong `/mnt/d` vì filesystem Windows có thể lỗi symlink `lib -> lib64`; hãy tạo venv trong filesystem Linux:
+
+```bash
+sudo apt update
+sudo apt install -y openjdk-17-jdk python3-venv
+mkdir -p /root/.venvs
+python3 -m venv /root/.venvs/ai_application
+. /root/.venvs/ai_application/bin/activate
+python -m pip install --upgrade pip
+python -m pip install pytest black flake8 pyspark
+```
+
+Nếu shell là `bash`, có thể dùng `source /root/.venvs/ai_application/bin/activate`; nếu shell là `sh`, dùng dấu chấm `.` như lệnh ở trên.
+
+Chạy test và ETL local:
+
+```bash
+python -m pytest tests/test_spark_etl_config.py
+rm -rf data/processed/products_processed
+python -m jobs.spark_etl \
+  --input-products data/raw/amazon_products.jsonl \
+  --input-reviews data/raw/amazon_reviews.jsonl \
+  --output-path data/processed/products_processed \
+  --output-format parquet \
+  --master "local[*]"
+ls -la data/processed/products_processed
 ```
 
 ---
