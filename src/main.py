@@ -15,6 +15,9 @@ import hmac
 import json
 import os
 import re
+import shlex
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -31,13 +34,19 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from src.agent import ProductSearchTool, SmartShopAgent
-from src.cache_service import RateLimitResult, RedisConfig, RedisService
+from src.cache_service import (
+    HumanApprovalRequest,
+    RateLimitResult,
+    RedisConfig,
+    RedisService,
+)
 from src.monitoring import MonitoringService
 from src.streaming import KafkaClickEventProducer, StreamingConfig
 from src.vector_store import ProductSearchFilters, VectorSearchService
@@ -45,9 +54,16 @@ from src.vector_store import ProductSearchFilters, VectorSearchService
 
 DEFAULT_API_TITLE = "SmartShop AI API Layer"
 DEFAULT_UPLOAD_DIR = "data/uploads/catalog"
+DEFAULT_ETL_OUTPUT_DIR = "data/processed/catalog_uploads"
 DEFAULT_JWT_SECRET = "dev-smartshop-secret"
+DEFAULT_CORS_ALLOWED_ORIGINS = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+)
 PUBLIC_PATH_PREFIXES = ("/docs", "/redoc", "/openapi.json")
-PUBLIC_PATHS = {"/health"}
+PUBLIC_PATHS = {"/health", "/health/ready"}
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -99,6 +115,42 @@ class CacheService(Protocol):
     ) -> RateLimitResult:
         """Check whether a caller can continue."""
 
+    def create_human_approval_request(
+        self,
+        session_id: str,
+        message: str,
+        history: list[dict[str, Any]] | None = None,
+        reason: str = "",
+        metadata: dict[str, Any] | None = None,
+        ttl_seconds: int | None = None,
+    ) -> HumanApprovalRequest:
+        """Queue a request for human support approval."""
+
+    def get_human_approval_request(
+        self,
+        request_id: str,
+    ) -> HumanApprovalRequest | None:
+        """Return one human approval request."""
+
+    def list_pending_human_approvals(
+        self,
+        limit: int = 20,
+    ) -> list[HumanApprovalRequest]:
+        """Return pending human approval requests."""
+
+    def resolve_human_approval_request(
+        self,
+        request_id: str,
+        approved: bool,
+        reviewer: str,
+        note: str | None = None,
+        ttl_seconds: int | None = None,
+    ) -> HumanApprovalRequest:
+        """Mark a human approval request approved or rejected."""
+
+    def ping(self) -> bool:
+        """Return Redis connectivity status."""
+
 
 class SearchService(Protocol):
     def search_products(
@@ -111,21 +163,71 @@ class SearchService(Protocol):
         """Search products."""
 
 
+class ETLJobRunner(Protocol):
+    def run(self, input_path: str, manifest_path: str, config: "APIConfig") -> dict:
+        """Run the catalog ETL job for an uploaded file."""
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _split_env_list(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
 @dataclass(frozen=True)
 class APIConfig:
     title: str = DEFAULT_API_TITLE
+    environment: str = "dev"
     upload_dir: str = DEFAULT_UPLOAD_DIR
+    etl_output_dir: str = DEFAULT_ETL_OUTPUT_DIR
+    etl_output_format: str = "parquet"
+    etl_spark_master: str | None = None
+    etl_command: str | None = None
+    etl_timeout_seconds: int = 30 * 60
+    cors_allowed_origins: tuple[str, ...] = DEFAULT_CORS_ALLOWED_ORIGINS
+    cors_allow_credentials: bool = True
     jwt_secret: str = DEFAULT_JWT_SECRET
     jwt_algorithm: str = "HS256"
+    jwt_algorithms: tuple[str, ...] = ("RS256",)
+    jwt_issuer: str | None = None
+    jwt_audience: str | None = None
+    jwt_jwks_url: str | None = None
+    jwt_public_key: str | None = None
     access_token_expire_minutes: int = 60
     chat_history_limit: int = 20
     chat_chunk_delay_seconds: float = 0.0
 
     @classmethod
     def from_env(cls) -> "APIConfig":
+        cors_origins = _split_env_list(os.getenv("SMARTSHOP_CORS_ORIGINS"))
+        jwt_algorithms = _split_env_list(os.getenv("SMARTSHOP_JWT_ALGORITHMS"))
         return cls(
+            environment=os.getenv("SMARTSHOP_ENV", "dev"),
             upload_dir=os.getenv("SMARTSHOP_UPLOAD_DIR", DEFAULT_UPLOAD_DIR),
+            etl_output_dir=os.getenv(
+                "SMARTSHOP_ETL_OUTPUT_DIR", DEFAULT_ETL_OUTPUT_DIR
+            ),
+            etl_output_format=os.getenv("SMARTSHOP_ETL_OUTPUT_FORMAT", "parquet"),
+            etl_spark_master=os.getenv("SMARTSHOP_ETL_SPARK_MASTER") or None,
+            etl_command=os.getenv("SMARTSHOP_ETL_COMMAND") or None,
+            etl_timeout_seconds=int(os.getenv("SMARTSHOP_ETL_TIMEOUT_SECONDS", "1800")),
+            cors_allowed_origins=cors_origins or DEFAULT_CORS_ALLOWED_ORIGINS,
+            cors_allow_credentials=_env_bool("SMARTSHOP_CORS_ALLOW_CREDENTIALS", True),
             jwt_secret=os.getenv("SMARTSHOP_JWT_SECRET", DEFAULT_JWT_SECRET),
+            jwt_algorithms=jwt_algorithms or ("RS256",),
+            jwt_issuer=os.getenv("SMARTSHOP_JWT_ISSUER") or None,
+            jwt_audience=os.getenv("SMARTSHOP_JWT_AUDIENCE") or None,
+            jwt_jwks_url=os.getenv("SMARTSHOP_JWKS_URL") or None,
+            jwt_public_key=(
+                os.getenv("SMARTSHOP_JWT_PUBLIC_KEY", "").replace("\\n", "\n") or None
+            ),
             access_token_expire_minutes=int(
                 os.getenv("SMARTSHOP_TOKEN_EXPIRE_MINUTES", "60")
             ),
@@ -135,6 +237,8 @@ class APIConfig:
 class TokenPayload(BaseModel):
     sub: str
     exp: int | None = None
+    iss: str | None = None
+    aud: str | list[str] | None = None
     scopes: list[str] = Field(default_factory=list)
 
 
@@ -160,8 +264,34 @@ class ChatRequest(BaseModel):
 class UploadResponse(BaseModel):
     filename: str
     saved_path: str
+    manifest_path: str | None = None
     bytes_received: int
     status: str
+    etl_status: str = "queued"
+
+
+class HumanApprovalRequestPayload(BaseModel):
+    request_id: str
+    session_id: str
+    message: str
+    history: list[dict[str, Any]] = Field(default_factory=list)
+    reason: str = ""
+    status: str
+    created_at: str
+    resolved_at: str | None = None
+    resolved_by: str | None = None
+    note: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class HumanApprovalListResponse(BaseModel):
+    requests: list[HumanApprovalRequestPayload]
+
+
+class ResolveHumanApprovalRequest(BaseModel):
+    approved: bool
+    reviewer: str | None = None
+    note: str | None = None
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -203,7 +333,14 @@ def create_access_token(
     return f"{signing_input}.{_b64url_encode(signature)}"
 
 
-def verify_access_token(token: str, secret: str) -> TokenPayload:
+def _normalize_token_payload(payload: dict[str, Any]) -> TokenPayload:
+    scopes = payload.get("scopes", [])
+    if not scopes and payload.get("scope"):
+        scopes = str(payload["scope"]).split()
+    return TokenPayload(**{**payload, "scopes": scopes})
+
+
+def _verify_hs256_dev_access_token(token: str, secret: str) -> TokenPayload:
     try:
         header_b64, payload_b64, signature_b64 = token.split(".")
     except ValueError as exc:
@@ -240,7 +377,7 @@ def verify_access_token(token: str, secret: str) -> TokenPayload:
             detail="Unsupported token algorithm.",
         )
 
-    token_payload = TokenPayload(**payload)
+    token_payload = _normalize_token_payload(payload)
     if token_payload.exp and token_payload.exp < int(
         datetime.now(timezone.utc).timestamp()
     ):
@@ -254,6 +391,65 @@ def verify_access_token(token: str, secret: str) -> TokenPayload:
             detail="Bearer token subject is missing.",
         )
     return token_payload
+
+
+def _verify_issuer_access_token(token: str, config: APIConfig) -> TokenPayload:
+    try:
+        import jwt
+    except ImportError as exc:
+        raise RuntimeError(
+            "PyJWT with crypto support is required for issuer/JWKS token validation. "
+            "Install `pyjwt[crypto]` or use the dev HS256 fallback locally."
+        ) from exc
+
+    algorithms = list(config.jwt_algorithms or ("RS256",))
+    try:
+        if config.jwt_public_key:
+            signing_key = config.jwt_public_key
+        elif config.jwt_jwks_url:
+            signing_key = (
+                jwt.PyJWKClient(config.jwt_jwks_url).get_signing_key_from_jwt(token).key
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="JWT issuer validation is not configured.",
+            )
+
+        payload = jwt.decode(
+            token,
+            signing_key,
+            algorithms=algorithms,
+            audience=config.jwt_audience,
+            issuer=config.jwt_issuer,
+            options={"verify_aud": config.jwt_audience is not None},
+        )
+    except jwt.PyJWTError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid bearer token.",
+        ) from exc
+    return _normalize_token_payload(payload)
+
+
+def verify_access_token(token: str, config_or_secret: APIConfig | str) -> TokenPayload:
+    if isinstance(config_or_secret, APIConfig):
+        config = config_or_secret
+    else:
+        config = APIConfig(jwt_secret=config_or_secret)
+
+    if config.jwt_jwks_url or config.jwt_public_key:
+        return _verify_issuer_access_token(token, config)
+
+    if (
+        config.environment.strip().lower() not in {"dev", "local", "test"}
+        and config.jwt_secret == DEFAULT_JWT_SECRET
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="JWT issuer/JWKS validation must be configured outside dev.",
+        )
+    return _verify_hs256_dev_access_token(token, config.jwt_secret)
 
 
 def _is_public_path(path: str) -> bool:
@@ -284,29 +480,149 @@ def _safe_upload_filename(filename: str | None) -> str:
     return clean_name or "catalog.csv"
 
 
+def _manifest_path_for(target_path: Path) -> Path:
+    return target_path.with_suffix(target_path.suffix + ".manifest.json")
+
+
+def _write_upload_manifest(manifest_path: Path, payload: dict[str, Any]) -> None:
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _load_upload_manifest(manifest_path: Path) -> dict[str, Any]:
+    if not manifest_path.exists():
+        return {}
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+
+def _format_etl_command(command: str, values: dict[str, str]) -> list[str]:
+    formatted = command.format(**values)
+    return shlex.split(formatted, posix=os.name != "nt")
+
+
+def _default_etl_command(
+    input_path: str, output_path: str, config: APIConfig
+) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "jobs.spark_etl",
+        "--input-products",
+        input_path,
+        "--output",
+        output_path,
+        "--output-format",
+        config.etl_output_format,
+    ]
+    if config.etl_spark_master:
+        command.extend(["--master", config.etl_spark_master])
+    return command
+
+
+class SubprocessETLJobRunner:
+    def run(self, input_path: str, manifest_path: str, config: APIConfig) -> dict:
+        manifest_file = Path(manifest_path)
+        manifest = _load_upload_manifest(manifest_file)
+        output_path = str(
+            Path(config.etl_output_dir)
+            / f"{Path(input_path).stem}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        )
+        values = {
+            "input_path": input_path,
+            "output_path": output_path,
+            "output_format": config.etl_output_format,
+            "manifest_path": manifest_path,
+        }
+        command = (
+            _format_etl_command(config.etl_command, values)
+            if config.etl_command
+            else _default_etl_command(input_path, output_path, config)
+        )
+        started_at = datetime.now(timezone.utc).isoformat()
+
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=config.etl_timeout_seconds,
+            )
+            status_label = "completed" if completed.returncode == 0 else "failed"
+            result = {
+                "status": status_label,
+                "command": command,
+                "returncode": completed.returncode,
+                "output_path": output_path,
+                "started_at": started_at,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "stdout": completed.stdout[-4000:],
+                "stderr": completed.stderr[-4000:],
+            }
+        except Exception as exc:  # noqa: BLE001
+            result = {
+                "status": "failed",
+                "command": command,
+                "returncode": None,
+                "output_path": output_path,
+                "started_at": started_at,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "error": str(exc),
+            }
+
+        manifest.update({"status": f"etl_{result['status']}", "etl": result})
+        _write_upload_manifest(manifest_file, manifest)
+        return result
+
+
 def _save_upload(target_path: str, filename: str, contents: bytes) -> str:
     target_path = Path(target_path)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_bytes(contents)
-    manifest_path = target_path.with_suffix(target_path.suffix + ".manifest.json")
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "filename": filename,
-                "saved_path": str(target_path),
-                "bytes_received": len(contents),
-                "status": "queued_for_etl",
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
+    manifest_path = _manifest_path_for(target_path)
+    _write_upload_manifest(
+        manifest_path,
+        {
+            "filename": filename,
+            "saved_path": str(target_path),
+            "bytes_received": len(contents),
+            "status": "queued_for_etl",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        },
     )
     return str(target_path)
 
 
+def _save_upload_and_run_etl(
+    target_path: str,
+    filename: str,
+    contents: bytes,
+    etl_runner: ETLJobRunner,
+    config: APIConfig,
+) -> None:
+    saved_path = _save_upload(target_path, filename, contents)
+    manifest_path = _manifest_path_for(Path(saved_path))
+    manifest = _load_upload_manifest(manifest_path)
+    manifest["status"] = "etl_running"
+    manifest["etl"] = {
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _write_upload_manifest(manifest_path, manifest)
+    etl_runner.run(saved_path, str(manifest_path), config)
+
+
 def _sse_event(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _approval_payload(
+    request: HumanApprovalRequest,
+) -> HumanApprovalRequestPayload:
+    return HumanApprovalRequestPayload(**request.to_dict())
 
 
 def create_app(
@@ -316,6 +632,7 @@ def create_app(
     config: APIConfig | None = None,
     monitoring: MonitoringService | None = None,
     kafka_producer: KafkaClickEventProducer | None = None,
+    etl_runner: ETLJobRunner | None = None,
 ) -> FastAPI:
     config = config or APIConfig.from_env()
     monitoring = monitoring or MonitoringService.from_env()
@@ -334,6 +651,16 @@ def create_app(
     app.state.agent = agent
     app.state.monitoring = monitoring
     app.state.kafka_producer = kafka_producer
+    app.state.etl_runner = etl_runner or SubprocessETLJobRunner()
+
+    if config.cors_allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(config.cors_allowed_origins),
+            allow_credentials=config.cors_allow_credentials,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type"],
+        )
 
     # Phase 10: attach Prometheus /metrics endpoint
     monitoring.instrument(app)
@@ -387,6 +714,10 @@ def get_agent(request: Request) -> SmartShopAgent:
     return request.app.state.agent
 
 
+def get_monitoring(request: Request) -> MonitoringService:
+    return request.app.state.monitoring
+
+
 def get_kafka_producer(request: Request) -> KafkaClickEventProducer | None:
     """Lazily initialise the Kafka producer from environment variables.
 
@@ -409,6 +740,10 @@ def get_kafka_producer(request: Request) -> KafkaClickEventProducer | None:
     return request.app.state.kafka_producer
 
 
+def get_etl_runner(request: Request) -> ETLJobRunner:
+    return request.app.state.etl_runner
+
+
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     config: APIConfig = Depends(get_config),
@@ -418,7 +753,13 @@ def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Bearer token is required.",
         )
-    payload = verify_access_token(credentials.credentials, config.jwt_secret)
+    try:
+        payload = verify_access_token(credentials.credentials, config)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
     return CurrentUser(user_id=payload.sub, scopes=payload.scopes)
 
 
@@ -440,6 +781,29 @@ def enforce_rate_limit(
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/health/ready")
+async def readiness(request: Request) -> JSONResponse:
+    try:
+        cache_service = get_cache_service(request)
+        redis_ok = cache_service.ping()
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "status": "unhealthy",
+                "redis": "unavailable",
+                "detail": str(exc),
+            },
+        )
+
+    if not redis_ok:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"status": "unhealthy", "redis": "unavailable"},
+        )
+    return JSONResponse(content={"status": "ok", "redis": "ok"})
 
 
 @app.get("/search", response_model=SearchResponse)
@@ -511,6 +875,7 @@ async def stream_agent_response(
     agent: SmartShopAgent,
     cache_service: CacheService,
     config: APIConfig,
+    monitoring: MonitoringService,
 ) -> AsyncIterator[str]:
     history: list[dict[str, Any]] = []
     if request.session_id:
@@ -524,11 +889,28 @@ async def stream_agent_response(
             request.message,
         )
 
+    monitoring.record_chat()
     response = agent.handle_message(
         request.message,
         history=history,
         approved_by_human=request.approved_by_human,
     )
+    monitoring.record_agent_decision(response.action)
+    for event in response.trace_events:
+        if event.event == "tool_call" and event.tool:
+            monitoring.record_agent_tool_call(event.tool, event.status)
+
+    approval_request_id: str | None = None
+    if response.requires_human_review:
+        approval = cache_service.create_human_approval_request(
+            session_id=request.session_id or "ad-hoc",
+            message=request.message,
+            history=history,
+            reason=response.reason,
+            metadata={"action": response.action},
+        )
+        approval_request_id = approval.request_id
+
     if request.session_id:
         cache_service.append_session_message(
             request.session_id,
@@ -537,10 +919,17 @@ async def stream_agent_response(
             metadata={
                 "action": response.action,
                 "requires_human_review": response.requires_human_review,
+                "approval_request_id": approval_request_id,
             },
         )
 
-    yield _sse_event("start", {"action": response.action})
+    yield _sse_event(
+        "start",
+        {
+            "action": response.action,
+            "approval_request_id": approval_request_id,
+        },
+    )
     for chunk in response.content.split():
         yield _sse_event("chunk", {"content": chunk})
         if config.chat_chunk_delay_seconds > 0:
@@ -551,6 +940,7 @@ async def stream_agent_response(
             "content": response.content,
             "action": response.action,
             "requires_human_review": response.requires_human_review,
+            "approval_request_id": approval_request_id,
             "tool_outputs": response.tool_outputs,
         },
     )
@@ -562,10 +952,11 @@ async def chat(
     agent: SmartShopAgent = Depends(get_agent),
     cache_service: CacheService = Depends(get_cache_service),
     config: APIConfig = Depends(get_config),
+    monitoring: MonitoringService = Depends(get_monitoring),
     _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
 ) -> StreamingResponse:
     return StreamingResponse(
-        stream_agent_response(request, agent, cache_service, config),
+        stream_agent_response(request, agent, cache_service, config, monitoring),
         media_type="text/event-stream",
     )
 
@@ -578,6 +969,7 @@ async def chat_stream(
     agent: SmartShopAgent = Depends(get_agent),
     cache_service: CacheService = Depends(get_cache_service),
     config: APIConfig = Depends(get_config),
+    monitoring: MonitoringService = Depends(get_monitoring),
     _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
 ) -> StreamingResponse:
     request = ChatRequest(
@@ -586,9 +978,71 @@ async def chat_stream(
         approved_by_human=approved_by_human,
     )
     return StreamingResponse(
-        stream_agent_response(request, agent, cache_service, config),
+        stream_agent_response(request, agent, cache_service, config, monitoring),
         media_type="text/event-stream",
     )
+
+
+@app.get("/approvals/pending", response_model=HumanApprovalListResponse)
+async def list_pending_human_approvals(
+    limit: int = 20,
+    cache_service: CacheService = Depends(get_cache_service),
+    _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
+) -> HumanApprovalListResponse:
+    if limit < 1 or limit > 100:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="limit must be between 1 and 100.",
+        )
+    requests = cache_service.list_pending_human_approvals(limit=limit)
+    return HumanApprovalListResponse(
+        requests=[_approval_payload(request) for request in requests]
+    )
+
+
+@app.get(
+    "/approvals/{request_id}",
+    response_model=HumanApprovalRequestPayload,
+)
+async def get_human_approval(
+    request_id: str,
+    cache_service: CacheService = Depends(get_cache_service),
+    _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
+) -> HumanApprovalRequestPayload:
+    approval = cache_service.get_human_approval_request(request_id)
+    if approval is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Approval request not found.",
+        )
+    return _approval_payload(approval)
+
+
+@app.post(
+    "/approvals/{request_id}/resolve",
+    response_model=HumanApprovalRequestPayload,
+)
+async def resolve_human_approval(
+    request_id: str,
+    payload: ResolveHumanApprovalRequest,
+    cache_service: CacheService = Depends(get_cache_service),
+    current_user: CurrentUser = Depends(get_current_user),
+    _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
+) -> HumanApprovalRequestPayload:
+    reviewer = payload.reviewer or current_user.user_id
+    try:
+        approval = cache_service.resolve_human_approval_request(
+            request_id=request_id,
+            approved=payload.approved,
+            reviewer=reviewer,
+            note=payload.note,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Approval request not found.",
+        ) from exc
+    return _approval_payload(approval)
 
 
 @app.post("/upload", response_model=UploadResponse)
@@ -597,6 +1051,8 @@ async def upload_catalog(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     config: APIConfig = Depends(get_config),
+    etl_runner: ETLJobRunner = Depends(get_etl_runner),
+    monitoring: MonitoringService = Depends(get_monitoring),
     _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
 ) -> UploadResponse:
     filename = _safe_upload_filename(file.filename)
@@ -616,12 +1072,23 @@ async def upload_catalog(
     target_dir = Path(config.upload_dir)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     preview_path = target_dir / f"{timestamp}_{filename}"
-    background_tasks.add_task(_save_upload, str(preview_path), filename, contents)
+    manifest_path = _manifest_path_for(preview_path)
+    background_tasks.add_task(
+        _save_upload_and_run_etl,
+        str(preview_path),
+        filename,
+        contents,
+        etl_runner,
+        config,
+    )
+    monitoring.record_upload(success=True)
     return UploadResponse(
         filename=filename,
         saved_path=str(preview_path),
+        manifest_path=str(manifest_path),
         bytes_received=len(contents),
         status="queued_for_etl",
+        etl_status="queued",
     )
 
 
@@ -682,9 +1149,9 @@ async def record_click_event(
         except Exception as exc:  # noqa: BLE001
             # Log but do not propagate – API remains responsive
             import logging as _logging
+
             _logging.getLogger(__name__).error("Kafka publish error: %s", exc)
 
     return ClickEventResponse(
         status="accepted_no_broker", event=event_payload, kafka_available=False
     )
-

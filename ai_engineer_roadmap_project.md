@@ -729,11 +729,13 @@ async def chat_stream(message: str):
 
 Phan hien thuc nam trong `src/main.py`, gom:
 
-* `create_app`: FastAPI app factory ho tro inject fake Redis/Qdrant/Agent cho test.
+* `create_app`: FastAPI app factory ho tro inject fake Redis/Qdrant/Agent/ETL runner cho test.
 * `/search`: tim kiem san pham bang Qdrant, cache ket qua bang Redis va ho tro filter `category`, `brand`, `min_price`, `max_price`.
 * `/chat` va `/chat/stream`: Server-Sent Events streaming ket qua tu `SmartShopAgent`, dong thoi luu session memory vao Redis khi co `session_id`.
-* `/upload` va `/catalog/upload`: nhan file CSV catalog, luu vao `data/uploads/catalog` va tao manifest de pipeline ETL co the xu ly tiep.
-* Authentication bang Bearer JWT HS256 va fixed-window rate limit qua Redis.
+* `/upload` va `/catalog/upload`: nhan file CSV catalog, luu vao `data/uploads/catalog`, tao manifest va chay ETL background qua `jobs.spark_etl` hoac command duoc cau hinh bang `SMARTSHOP_ETL_COMMAND`.
+* CORS cau hinh qua `SMARTSHOP_CORS_ORIGINS` de frontend that goi API an toan, khong dung wildcard mac dinh.
+* Authentication bang Bearer JWT voi issuer/JWKS/public key RS256 cho production; HS256 secret chi la fallback dev/local/test.
+* Fixed-window/token-bucket rate limit qua Redis.
 
 Tao token local de goi API tu Python:
 
@@ -761,6 +763,12 @@ Kiem thu Phase 8 khong can Redis/Qdrant that:
 
 ```bash
 python -m pytest tests/test_api_phase8.py
+```
+
+Kiem thu integration voi Redis/Qdrant container that:
+
+```bash
+SMARTSHOP_RUN_CONTAINER_TESTS=1 python -m pytest tests/test_api_phase8_integration.py
 ```
 
 ---
@@ -846,11 +854,23 @@ spec:
 Phan hien thuc nam trong cac file:
 
 * `Dockerfile`: multi-stage image Python 3.11, cai dependencies trong virtualenv, chay non-root user `smartshop`, expose port `8000` va healthcheck `/health`.
-* `requirements-api.txt`: dependency runtime nhe cho API container; Spark/Delta/MLflow va cac goi training nang van nam trong `requirements.txt` / `environment.yml`.
+* `requirements-api.txt`: dependency runtime nhe cho API container; Spark/Delta/MLflow, PyTorch va `sentence-transformers` van nam trong `requirements.txt` / `environment.yml`.
 * `.dockerignore`: loai bo `.git`, cache, virtualenv, MLflow artifacts va data output de image nhe hon.
 * `docker-compose.yml`: dung local stack gom `api`, `redis`, `qdrant`, `kafka` va persistent volumes.
 * `k8s/`: manifest Kustomize cho `smartshop-api`, `redis`, `qdrant`, `kafka`, `Service` va `HorizontalPodAutoscaler`.
 * `src/cache_service.py`, `src/vector_store.py`, `src/streaming.py`: ho tro doc cau hinh tu bien moi truong nhu `REDIS_HOST`, `QDRANT_HOST`, `KAFKA_BOOTSTRAP_SERVERS`.
+
+Luu y ve encoder search trong API image:
+
+* `docker-compose.yml` va `k8s/api-deployment.yaml` dat `SMARTSHOP_EMBEDDING_BACKEND=hashing`.
+* `HashingTextEncoder` la encoder nhe, deterministic, khong can `sentence-transformers`/PyTorch, phu hop de demo Docker va kiem tra pipeline `/search`.
+* Chat luong semantic search cua hashing khong bang embedding that. Neu can ket qua production-quality, build image runtime rieng co `sentence-transformers` va dat `SMARTSHOP_EMBEDDING_BACKEND=sentence-transformers`, dong thoi index lai collection Qdrant bang cung encoder.
+
+Luu y ve Qdrant va du lieu search:
+
+* Container Qdrant moi khoi dong chi tao service, khong tu co du lieu san pham. Neu collection rong thi `/search` se khong tra ket qua co y nghia.
+* Co the index du lieu that tu `data/processed/products_processed` bang service `vector-indexer` trong Compose. Mac dinh indexer dung hashing de khop voi API image nhe; neu dung embedding that, hay build API bang target `full-runtime`, set API va indexer cung `SMARTSHOP_EMBEDDING_BACKEND=sentence-transformers`, roi index lai collection.
+* Sau khi index lai, Redis co the van giu cache ket qua search cu. Xoa cache bang `docker compose exec -T redis redis-cli FLUSHDB`.
 
 Chay local bang Docker Compose:
 
@@ -858,6 +878,26 @@ Chay local bang Docker Compose:
 docker compose up --build -d
 docker compose ps
 curl http://localhost:8000/health
+```
+
+Index Qdrant tu du lieu processed:
+
+```bash
+docker compose --profile indexer run --rm vector-indexer
+docker compose exec -T redis redis-cli FLUSHDB
+```
+
+Dung embedding that trong Docker cho ca index va `/search`:
+
+```bash
+SMARTSHOP_API_BUILD_TARGET=full-runtime \
+SMARTSHOP_EMBEDDING_BACKEND=sentence-transformers \
+SMARTSHOP_INDEX_EMBEDDING_BACKEND=sentence-transformers \
+docker compose up --build -d api qdrant redis
+
+SMARTSHOP_INDEX_EMBEDDING_BACKEND=sentence-transformers \
+docker compose --profile indexer run --rm vector-indexer
+docker compose exec -T redis redis-cli FLUSHDB
 ```
 
 Tao JWT dev token roi goi API:
@@ -887,7 +927,12 @@ docker compose config
 python -m pytest tests/test_deployment_phase9.py
 ```
 
-Luu y: API container trong `docker-compose.yml` duoc toi uu de boot nhanh cho backend runtime. Cac job ETL/training va indexing day du van nen chay bang Conda/venv theo `requirements.txt` hoac `environment.yml`, hoac tach thanh image worker rieng neu can production hoa pipeline du lieu.
+Luu y: API container trong `docker-compose.yml` duoc toi uu de boot nhanh cho backend runtime va demo search bang hashing encoder. Endpoint upload co the trigger ETL bang command cau hinh trong `SMARTSHOP_ETL_COMMAND`; neu command mac dinh can Spark day du, hay chay bang Conda/venv theo `requirements.txt` hoac tach thanh image worker rieng cho production pipeline.
+
+Luu y ve Kafka va K8s:
+
+* API da co endpoint `POST /events/click` de publish click event vao Kafka neu broker san sang; neu Kafka khong san sang endpoint van accept event de frontend khong bi block.
+* Manifest trong `k8s/` la ban hoc tap/local de hieu Deployment/Service/HPA. Production that nen bo sung Secret that cho JWT, PersistentVolume/StatefulSet cho Qdrant va Kafka, Ingress/TLS, resource tuning, readiness/liveness sau hon, va managed Kafka hoac Kafka operator.
 
 ---
 
@@ -972,6 +1017,15 @@ LANGFUSE_SECRET_KEY=sk-lf-...
 LANGFUSE_HOST=https://cloud.langfuse.com   # hoặc self-hosted
 ```
 
+Neu `LANGFUSE_PUBLIC_KEY` hoac `LANGFUSE_SECRET_KEY` bi bo trong, `LangfuseTracer` se tu tat tracing va API van chay binh thuong. Chi khi co key that thi trace LLM moi duoc gui len Langfuse.
+Docker Compose se doc `.env` va truyen cac bien nay vao container API. Neu chay local bang `uvicorn --reload`, hay export bien moi truong trong shell hoac chay `uvicorn src.main:app --reload --env-file .env`.
+
+Luu y ve Grafana dashboard:
+
+* `/metrics` duoc expose truc tiep tu FastAPI tai `http://localhost:8000/metrics`.
+* Khi chay local dev bang `uvicorn --reload`, Prometheus khong tu scrape endpoint nay nen dashboard Grafana co the hien `No data`.
+* Muon cac panel co data, chay du stack bang `docker compose up --build -d` de Prometheus scrape `api:8000/metrics`, sau do tao mot vai request vao `/search`, `/chat`, `/upload` hoac `/events/click`.
+
 Kiểm tra trạng thái monitoring module:
 
 ```bash
@@ -1003,4 +1057,3 @@ python -m pytest tests/test_monitoring_phase10.py -v
 5.  **Theo dõi & Giám sát**:
     *   Truy cập `http://localhost:3000` để xem Dashboard Grafana.
     *   Đăng nhập vào Cloud Langfuse để giám sát chi phí token và chất lượng Agent.
-

@@ -1,8 +1,10 @@
 import json
+import math
 
 import pytest
 
 from src.cache_service import (
+    HumanApprovalRequest,
     RedisConfig,
     RedisService,
     SessionMessage,
@@ -48,6 +50,9 @@ class FakeRedisClient:
         self.values[name] = value
         self.expiries[name] = time
 
+    def ping(self):
+        return True
+
     def delete(self, *names):
         deleted_count = 0
         for name in names:
@@ -80,6 +85,18 @@ class FakeRedisClient:
             end = len(rows) + end
         self.lists[name] = rows[start : end + 1]
 
+    def lrem(self, name, count, value):
+        rows = self.lists.get(name, [])
+        removed = 0
+        remaining = []
+        for row in rows:
+            if row == value and (count == 0 or removed < abs(count)):
+                removed += 1
+                continue
+            remaining.append(row)
+        self.lists[name] = remaining
+        return removed
+
     def expire(self, name, time):
         self.expiries[name] = time
 
@@ -93,8 +110,39 @@ class FakeRedisClient:
     def pipeline(self):
         return FakePipeline(self)
 
+    def eval(self, script, numkeys, *keys_and_args):  # noqa: ARG002
+        key, limit, refill_rate, now, ttl_seconds, requested = keys_and_args
+        limit = int(limit)
+        refill_rate = float(refill_rate)
+        now = float(now)
+        ttl_seconds = int(ttl_seconds)
+        requested = int(requested)
 
-def build_service():
+        bucket = self.values.get(key)
+        tokens = float(limit)
+        updated_at = now
+        if bucket:
+            payload = json.loads(bucket)
+            tokens = float(payload.get("tokens", limit))
+            updated_at = float(payload.get("updated_at", now))
+            tokens = min(limit, tokens + max(0.0, now - updated_at) * refill_rate)
+
+        allowed = int(tokens >= requested)
+        if allowed:
+            tokens -= requested
+            reset_after = math.ceil((limit - tokens) / refill_rate)
+        else:
+            reset_after = math.ceil((requested - tokens) / refill_rate)
+
+        self.setex(
+            key,
+            ttl_seconds,
+            json.dumps({"tokens": tokens, "updated_at": now}),
+        )
+        return [allowed, math.floor(tokens), reset_after]
+
+
+def build_service(rate_limit_algorithm="token_bucket"):
     return RedisService(
         config=RedisConfig(
             key_prefix="testshop",
@@ -102,6 +150,7 @@ def build_service():
             session_ttl_seconds=3600,
             rate_limit=2,
             rate_window_seconds=30,
+            rate_limit_algorithm=rate_limit_algorithm,
         ),
         client=FakeRedisClient(),
     )
@@ -186,6 +235,35 @@ def test_clear_session_deletes_session_key():
     assert service.get_session_messages("S01") == []
 
 
+def test_human_approval_queue_round_trips_and_resolves():
+    service = build_service()
+
+    approval = service.create_human_approval_request(
+        session_id="S01",
+        message="refund damaged order",
+        history=[{"role": "user", "content": "hello"}],
+        reason="damaged order",
+    )
+
+    assert isinstance(approval, HumanApprovalRequest)
+    assert approval.status == "pending"
+    assert service.get_human_approval_request(approval.request_id).message == (
+        "refund damaged order"
+    )
+    assert service.list_pending_human_approvals()[0].request_id == approval.request_id
+
+    resolved = service.resolve_human_approval_request(
+        approval.request_id,
+        approved=True,
+        reviewer="agent-supervisor",
+        note="approved replacement",
+    )
+
+    assert resolved.status == "approved"
+    assert resolved.resolved_by == "agent-supervisor"
+    assert service.list_pending_human_approvals() == []
+
+
 def test_session_message_validates_required_fields():
     with pytest.raises(ValueError, match="role"):
         SessionMessage(role=" ", content="hello")
@@ -195,7 +273,7 @@ def test_session_message_validates_required_fields():
 
 
 def test_fixed_window_rate_limit_blocks_after_limit():
-    service = build_service()
+    service = build_service(rate_limit_algorithm="fixed_window")
 
     first = service.check_rate_limit("user-1")
     second = service.check_rate_limit("user-1")
@@ -210,6 +288,22 @@ def test_fixed_window_rate_limit_blocks_after_limit():
     assert third.reset_after_seconds == 30
 
 
+def test_token_bucket_rate_limit_refills_smoothly(monkeypatch):
+    clock = iter([1000.0, 1000.0, 1015.0])
+    monkeypatch.setattr("src.cache_service.time.time", lambda: next(clock))
+    service = build_service()
+
+    first = service.check_rate_limit("user-1")
+    second = service.check_rate_limit("user-1")
+    third = service.check_rate_limit("user-1")
+
+    assert first.allowed is True
+    assert second.allowed is True
+    assert third.allowed is True
+    assert third.remaining == 0
+    assert third.key == "testshop:rate:token_bucket:user-1"
+
+
 def test_build_parser_parses_rate_check_command():
     args = build_parser().parse_args(
         [
@@ -220,6 +314,8 @@ def test_build_parser_parses_rate_check_command():
             "5",
             "--window-seconds",
             "10",
+            "--algorithm",
+            "fixed_window",
         ]
     )
 
@@ -227,6 +323,7 @@ def test_build_parser_parses_rate_check_command():
     assert args.identity == "127.0.0.1"
     assert args.limit == 5
     assert args.window_seconds == 10
+    assert args.algorithm == "fixed_window"
 
 
 def test_redis_config_can_be_loaded_from_env(monkeypatch):
@@ -243,6 +340,16 @@ def test_redis_config_can_be_loaded_from_env(monkeypatch):
     assert config.db == 2
     assert config.key_prefix == "prodshop"
     assert config.rate_limit == 100
+    assert config.rate_limit_algorithm == "token_bucket"
+
+
+def test_redis_config_namespaces_default_key_prefix_by_environment(monkeypatch):
+    monkeypatch.delenv("SMARTSHOP_REDIS_KEY_PREFIX", raising=False)
+    monkeypatch.setenv("SMARTSHOP_ENV", "staging")
+
+    config = RedisConfig.from_env()
+
+    assert config.key_prefix == "smartshop:staging"
 
 
 def test_cli_cache_payload_is_valid_json_shape():

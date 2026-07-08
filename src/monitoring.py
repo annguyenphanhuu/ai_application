@@ -35,12 +35,13 @@ class LangfuseConfig:
         default_factory=lambda: os.getenv("LANGFUSE_SECRET_KEY", "")
     )
     host: str = field(
-        default_factory=lambda: os.getenv(
-            "LANGFUSE_HOST", "https://cloud.langfuse.com"
-        )
+        default_factory=lambda: os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
     )
     enabled: bool = field(
-        default_factory=lambda: bool(os.getenv("LANGFUSE_PUBLIC_KEY", ""))
+        default_factory=lambda: bool(
+            os.getenv("LANGFUSE_PUBLIC_KEY", "")
+            and os.getenv("LANGFUSE_SECRET_KEY", "")
+        )
     )
 
 
@@ -68,9 +69,7 @@ class MonitoringConfig:
         """Build config entirely from environment variables."""
         return cls(
             prometheus=PrometheusConfig(
-                metrics_endpoint=os.getenv(
-                    "PROMETHEUS_METRICS_ENDPOINT", "/metrics"
-                ),
+                metrics_endpoint=os.getenv("PROMETHEUS_METRICS_ENDPOINT", "/metrics"),
             ),
             langfuse=LangfuseConfig(),
         )
@@ -94,6 +93,7 @@ def _get_or_create_registry() -> Any:
     if _CUSTOM_REGISTRY is None:
         try:
             from prometheus_client import CollectorRegistry  # type: ignore
+
             _CUSTOM_REGISTRY = CollectorRegistry()
         except ImportError:
             pass
@@ -149,6 +149,18 @@ def _build_custom_metrics() -> dict[str, Any]:
                 "smartshop_llm_latency_seconds",
                 "LLM call latency in seconds.",
                 buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0],
+                registry=registry,
+            ),
+            "agent_decisions_total": Counter(
+                "smartshop_agent_decisions_total",
+                "Total agent decisions by action.",
+                ["action"],
+                registry=registry,
+            ),
+            "agent_tool_calls_total": Counter(
+                "smartshop_agent_tool_calls_total",
+                "Total agent tool calls by tool and status.",
+                ["tool", "status"],
                 registry=registry,
             ),
             # Upload
@@ -284,9 +296,7 @@ def track_llm_call(
         if prompt_tokens and "llm_tokens_total" in metrics:
             metrics["llm_tokens_total"].labels(type="prompt").inc(prompt_tokens)
         if completion_tokens and "llm_tokens_total" in metrics:
-            metrics["llm_tokens_total"].labels(type="completion").inc(
-                completion_tokens
-            )
+            metrics["llm_tokens_total"].labels(type="completion").inc(completion_tokens)
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +333,9 @@ class LangfuseTracer:
             logger.info("Langfuse client initialised (host=%s).", self.config.host)
         except ImportError:
             logger.warning("langfuse package not installed; LLM tracing disabled.")
+            self._enabled = False
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Langfuse client init failed; LLM tracing disabled: %s", exc)
             self._enabled = False
 
     @property
@@ -431,9 +444,7 @@ class MonitoringService:
         if "llm_tokens_total" not in self._metrics:
             return
         if prompt_tokens:
-            self._metrics["llm_tokens_total"].labels(type="prompt").inc(
-                prompt_tokens
-            )
+            self._metrics["llm_tokens_total"].labels(type="prompt").inc(prompt_tokens)
         if completion_tokens:
             self._metrics["llm_tokens_total"].labels(type="completion").inc(
                 completion_tokens
@@ -443,6 +454,19 @@ class MonitoringService:
         """Record how long an LLM call took."""
         if "llm_latency_seconds" in self._metrics:
             self._metrics["llm_latency_seconds"].observe(latency_seconds)
+
+    def record_agent_decision(self, action: str) -> None:
+        """Record one agent routing decision."""
+        if "agent_decisions_total" in self._metrics:
+            self._metrics["agent_decisions_total"].labels(action=action).inc()
+
+    def record_agent_tool_call(self, tool: str, status: str = "ok") -> None:
+        """Record one agent tool call."""
+        if "agent_tool_calls_total" in self._metrics:
+            self._metrics["agent_tool_calls_total"].labels(
+                tool=tool,
+                status=status,
+            ).inc()
 
     def record_upload(self, success: bool = True) -> None:
         """Record a catalog upload attempt."""

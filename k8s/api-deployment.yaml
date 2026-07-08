@@ -26,6 +26,8 @@ spec:
               value: redis
             - name: REDIS_PORT
               value: "6379"
+            - name: SMARTSHOP_ENV
+              value: prod
             - name: QDRANT_HOST
               value: qdrant
             - name: QDRANT_PORT
@@ -36,17 +38,43 @@ spec:
               value: hashing
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: kafka:9092
+            - name: SMARTSHOP_CORS_ORIGINS
+              value: https://frontend.smartshop.example
+            - name: SMARTSHOP_JWT_ISSUER
+              value: https://issuer.smartshop.example
+            - name: SMARTSHOP_JWT_AUDIENCE
+              value: smartshop-api
+            - name: SMARTSHOP_JWKS_URL
+              value: https://issuer.smartshop.example/.well-known/jwks.json
+            - name: SMARTSHOP_JWT_ALGORITHMS
+              value: RS256
             - name: SMARTSHOP_UPLOAD_DIR
               value: /app/data/uploads/catalog
-            - name: SMARTSHOP_JWT_SECRET
+            - name: SMARTSHOP_ETL_OUTPUT_DIR
+              value: /app/data/processed/catalog_uploads
+            - name: SMARTSHOP_ETL_OUTPUT_FORMAT
+              value: parquet
+            - name: SMARTSHOP_ETL_COMMAND
               valueFrom:
                 secretKeyRef:
                   name: smartshop-api-secret
-                  key: jwt-secret
+                  key: etl-command
+                  optional: true
+            - name: SMARTSHOP_AGENT_USE_LLM
+              value: auto
+            - name: SMARTSHOP_OPENAI_MODEL
+              value: o4-mini
+            - name: SMARTSHOP_POLICY_SOURCE_PATH
+              value: /app/data/policies/smartshop_policy.md
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: smartshop-api-secret
+                  key: openai-api-key
                   optional: true
           readinessProbe:
             httpGet:
-              path: /health
+              path: /health/ready
               port: http
             initialDelaySeconds: 10
             periodSeconds: 10

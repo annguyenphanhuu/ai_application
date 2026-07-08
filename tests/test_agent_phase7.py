@@ -1,7 +1,10 @@
+from types import SimpleNamespace
+
 import pytest
 
 from src.agent import (
     AgentConfig,
+    PolicySource,
     ProductSearchTool,
     SmartShopAgent,
     build_langgraph_app,
@@ -37,6 +40,24 @@ class FakeSearchService:
                 "score": 0.91,
             }
         ]
+
+
+class FakeToolCallingLLM:
+    def __init__(self, tool_name, args):
+        self.tool_name = tool_name
+        self.args = args
+        self.bound_tools = None
+
+    def bind_tools(self, tools):
+        self.bound_tools = tools
+        return self
+
+    def invoke(self, messages):
+        self.messages = messages
+        return SimpleNamespace(
+            tool_calls=[{"name": self.tool_name, "args": self.args}],
+            response_metadata={"token_usage": {"prompt_tokens": 10}},
+        )
 
 
 def build_agent(require_human_approval_for_tools=False):
@@ -78,6 +99,52 @@ def test_agent_searches_products_with_vector_tool():
         }
     ]
     assert response.tool_outputs[0]["tool"] == "search_products"
+
+
+def test_agent_uses_llm_tool_call_for_non_keyword_product_request():
+    service = FakeSearchService()
+    llm = FakeToolCallingLLM(
+        "search_products",
+        {"query": "ergonomic desk setup", "top_k": 1},
+    )
+    agent = SmartShopAgent(
+        config=AgentConfig(top_k=2, use_llm_routing="always"),
+        search_tool=ProductSearchTool(service),
+        llm=llm,
+    )
+
+    response = agent.handle_message("Can you compare comfort options for my desk?")
+
+    assert response.action == "search_products"
+    assert service.queries[0]["query"] == "ergonomic desk setup"
+    assert service.queries[0]["top_k"] == 1
+    assert llm.bound_tools is not None
+
+
+def test_agent_retrieves_policy_from_source_file(tmp_path):
+    policy_path = tmp_path / "policy.md"
+    policy_path.write_text(
+        "# Policies\n\n## shipping\n\nShips in 2 days from the local warehouse.\n",
+        encoding="utf-8",
+    )
+    llm = FakeToolCallingLLM(
+        "retrieve_policy",
+        {"topic": "shipping", "query": "shipping timing"},
+    )
+    agent = SmartShopAgent(
+        config=AgentConfig(
+            use_llm_routing="always", policy_source_path=str(policy_path)
+        ),
+        policy_source=PolicySource(policy_path),
+        search_tool=ProductSearchTool(FakeSearchService()),
+        llm=llm,
+    )
+
+    response = agent.handle_message("When will it ship?")
+
+    assert response.action == "answer_policy"
+    assert "Ships in 2 days" in response.content
+    assert str(policy_path) in response.content
 
 
 def test_agent_pauses_sensitive_case_for_human_review():

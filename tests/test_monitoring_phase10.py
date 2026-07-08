@@ -56,9 +56,17 @@ class TestLangfuseConfig:
         assert cfg.enabled
         assert cfg.public_key == "pk-test-123"
 
+    def test_disabled_when_secret_key_missing(self, monkeypatch):
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test-123")
+        monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+        mod = _fresh_monitoring()
+        cfg = mod.LangfuseConfig()
+        assert not cfg.enabled
+
     def test_custom_host(self, monkeypatch):
         monkeypatch.setenv("LANGFUSE_HOST", "http://my-langfuse.internal")
         monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
         mod = _fresh_monitoring()
         cfg = mod.LangfuseConfig()
         assert cfg.host == "http://my-langfuse.internal"
@@ -222,6 +230,23 @@ class TestLangfuseTracer:
 
         # Patch langfuse import to raise ImportError
         with patch.dict(sys.modules, {"langfuse": None}):
+            mod = _fresh_monitoring()
+            tracer = mod.LangfuseTracer()
+            assert not tracer.is_enabled
+
+    def test_init_client_failure_disables_tracing(self, monkeypatch):
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-x")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-x")
+
+        fake_module = types.ModuleType("langfuse")
+
+        class BrokenLangfuse:
+            def __init__(self, **kwargs):  # noqa: ARG002
+                raise RuntimeError("bad langfuse config")
+
+        fake_module.Langfuse = BrokenLangfuse
+
+        with patch.dict(sys.modules, {"langfuse": fake_module}):
             mod = _fresh_monitoring()
             tracer = mod.LangfuseTracer()
             assert not tracer.is_enabled

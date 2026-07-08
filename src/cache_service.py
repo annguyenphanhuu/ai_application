@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -18,6 +20,7 @@ DEFAULT_SEARCH_TTL_SECONDS = 300
 DEFAULT_SESSION_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_RATE_LIMIT = 60
 DEFAULT_RATE_WINDOW_SECONDS = 60
+DEFAULT_RATE_LIMIT_ALGORITHM = "token_bucket"
 
 
 class RedisClient(Protocol):
@@ -26,6 +29,9 @@ class RedisClient(Protocol):
 
     def setex(self, name: str, time: int, value: str) -> Any:
         """Set a value with TTL."""
+
+    def ping(self) -> Any:
+        """Return Redis connectivity status."""
 
     def delete(self, *names: str) -> Any:
         """Delete keys."""
@@ -39,6 +45,9 @@ class RedisClient(Protocol):
     def ltrim(self, name: str, start: int, end: int) -> Any:
         """Trim list values."""
 
+    def lrem(self, name: str, count: int, value: str) -> Any:
+        """Remove list values."""
+
     def expire(self, name: str, time: int) -> Any:
         """Set key expiry."""
 
@@ -51,6 +60,9 @@ class RedisClient(Protocol):
     def pipeline(self) -> Any:
         """Return a Redis pipeline."""
 
+    def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> Any:
+        """Evaluate a Lua script."""
+
 
 @dataclass(frozen=True)
 class RedisConfig:
@@ -62,9 +74,15 @@ class RedisConfig:
     session_ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS
     rate_limit: int = DEFAULT_RATE_LIMIT
     rate_window_seconds: int = DEFAULT_RATE_WINDOW_SECONDS
+    rate_limit_algorithm: str = DEFAULT_RATE_LIMIT_ALGORITHM
 
     @classmethod
     def from_env(cls) -> "RedisConfig":
+        environment = os.getenv("SMARTSHOP_ENV") or os.getenv("APP_ENV") or "dev"
+        key_prefix = os.getenv(
+            "SMARTSHOP_REDIS_KEY_PREFIX",
+            f"{DEFAULT_KEY_PREFIX}:{environment.strip().lower()}",
+        )
         return cls(
             host=os.getenv(
                 "REDIS_HOST", os.getenv("SMARTSHOP_REDIS_HOST", DEFAULT_REDIS_HOST)
@@ -76,7 +94,7 @@ class RedisConfig:
                 )
             ),
             db=int(os.getenv("REDIS_DB", os.getenv("SMARTSHOP_REDIS_DB", "0"))),
-            key_prefix=os.getenv("SMARTSHOP_REDIS_KEY_PREFIX", DEFAULT_KEY_PREFIX),
+            key_prefix=key_prefix,
             search_ttl_seconds=int(
                 os.getenv(
                     "SMARTSHOP_SEARCH_TTL_SECONDS", str(DEFAULT_SEARCH_TTL_SECONDS)
@@ -93,6 +111,10 @@ class RedisConfig:
                     "SMARTSHOP_RATE_WINDOW_SECONDS", str(DEFAULT_RATE_WINDOW_SECONDS)
                 )
             ),
+            rate_limit_algorithm=os.getenv(
+                "SMARTSHOP_RATE_LIMIT_ALGORITHM", DEFAULT_RATE_LIMIT_ALGORITHM
+            ).strip()
+            or DEFAULT_RATE_LIMIT_ALGORITHM,
         )
 
 
@@ -127,6 +149,52 @@ class SessionMessage:
 
 
 @dataclass(frozen=True)
+class HumanApprovalRequest:
+    request_id: str
+    session_id: str
+    message: str
+    history: list[dict[str, Any]] = field(default_factory=list)
+    reason: str = ""
+    status: str = "pending"
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    resolved_at: str | None = None
+    resolved_by: str | None = None
+    note: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.request_id.strip():
+            raise ValueError("approval request_id must not be empty.")
+        if not self.session_id.strip():
+            raise ValueError("approval session_id must not be empty.")
+        if not self.message.strip():
+            raise ValueError("approval message must not be empty.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "HumanApprovalRequest":
+        return cls(
+            request_id=str(payload.get("request_id", "")),
+            session_id=str(payload.get("session_id", "")),
+            message=str(payload.get("message", "")),
+            history=list(payload.get("history") or []),
+            reason=str(payload.get("reason", "")),
+            status=str(payload.get("status", "pending")),
+            created_at=str(
+                payload.get("created_at") or datetime.now(timezone.utc).isoformat()
+            ),
+            resolved_at=payload.get("resolved_at"),
+            resolved_by=payload.get("resolved_by"),
+            note=payload.get("note"),
+            metadata=dict(payload.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True)
 class RateLimitResult:
     allowed: bool
     limit: int
@@ -147,6 +215,49 @@ def normalize_query(query: str) -> str:
 
 
 class RedisService:
+    _TOKEN_BUCKET_SCRIPT = """
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local refill_rate = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local ttl = tonumber(ARGV[4])
+local requested = tonumber(ARGV[5])
+
+local tokens = capacity
+local updated_at = now
+local bucket = redis.call("GET", key)
+
+if bucket then
+    local data = cjson.decode(bucket)
+    tokens = tonumber(data["tokens"]) or capacity
+    updated_at = tonumber(data["updated_at"]) or now
+    local elapsed = math.max(0, now - updated_at)
+    tokens = math.min(capacity, tokens + (elapsed * refill_rate))
+end
+
+local allowed = 0
+if tokens >= requested then
+    tokens = tokens - requested
+    allowed = 1
+end
+
+local reset_after = 0
+if allowed == 1 then
+    reset_after = math.ceil((capacity - tokens) / refill_rate)
+else
+    reset_after = math.ceil((requested - tokens) / refill_rate)
+end
+
+redis.call(
+    "SETEX",
+    key,
+    ttl,
+    cjson.encode({tokens = tokens, updated_at = now})
+)
+
+return {allowed, math.floor(tokens), reset_after}
+"""
+
     def __init__(
         self,
         config: RedisConfig | None = None,
@@ -176,6 +287,9 @@ class RedisService:
         clean_parts = [self.config.key_prefix.strip(":")]
         clean_parts.extend(str(part).strip(":") for part in parts if str(part))
         return ":".join(clean_parts)
+
+    def ping(self) -> bool:
+        return bool(self.client.ping())
 
     def build_search_cache_key(
         self,
@@ -265,7 +379,103 @@ class RedisService:
             raise ValueError("session_id must not be empty.")
         return int(self.client.delete(self.key("session", session_id)))
 
+    def create_human_approval_request(
+        self,
+        session_id: str,
+        message: str,
+        history: Sequence[dict[str, Any]] | None = None,
+        reason: str = "",
+        metadata: dict[str, Any] | None = None,
+        ttl_seconds: int | None = None,
+    ) -> HumanApprovalRequest:
+        request = HumanApprovalRequest(
+            request_id=uuid.uuid4().hex,
+            session_id=session_id,
+            message=message,
+            history=list(history or []),
+            reason=reason,
+            metadata=metadata or {},
+        )
+        payload = json.dumps(request.to_dict(), ensure_ascii=False)
+        ttl = ttl_seconds or self.config.session_ttl_seconds
+        self.client.setex(self.key("approval", request.request_id), ttl, payload)
+        self.client.rpush(self.key("approval", "pending"), request.request_id)
+        self.client.expire(self.key("approval", "pending"), ttl)
+        return request
+
+    def get_human_approval_request(
+        self,
+        request_id: str,
+    ) -> HumanApprovalRequest | None:
+        if not request_id.strip():
+            raise ValueError("approval request_id must not be empty.")
+        payload = self.client.get(self.key("approval", request_id))
+        if not payload:
+            return None
+        return HumanApprovalRequest.from_payload(json.loads(payload))
+
+    def list_pending_human_approvals(
+        self,
+        limit: int = 20,
+    ) -> list[HumanApprovalRequest]:
+        if limit < 1:
+            raise ValueError("limit must be greater than zero.")
+        ids = self.client.lrange(self.key("approval", "pending"), 0, limit - 1)
+        requests: list[HumanApprovalRequest] = []
+        for request_id in ids:
+            request = self.get_human_approval_request(str(request_id))
+            if request is not None and request.status == "pending":
+                requests.append(request)
+        return requests
+
+    def resolve_human_approval_request(
+        self,
+        request_id: str,
+        approved: bool,
+        reviewer: str,
+        note: str | None = None,
+        ttl_seconds: int | None = None,
+    ) -> HumanApprovalRequest:
+        request = self.get_human_approval_request(request_id)
+        if request is None:
+            raise KeyError(f"approval request not found: {request_id}")
+
+        resolved = HumanApprovalRequest(
+            request_id=request.request_id,
+            session_id=request.session_id,
+            message=request.message,
+            history=request.history,
+            reason=request.reason,
+            status="approved" if approved else "rejected",
+            created_at=request.created_at,
+            resolved_at=datetime.now(timezone.utc).isoformat(),
+            resolved_by=reviewer,
+            note=note,
+            metadata=request.metadata,
+        )
+        ttl = ttl_seconds or self.config.session_ttl_seconds
+        self.client.setex(
+            self.key("approval", request_id),
+            ttl,
+            json.dumps(resolved.to_dict(), ensure_ascii=False),
+        )
+        self.client.lrem(self.key("approval", "pending"), 0, request_id)
+        return resolved
+
     def check_rate_limit(
+        self,
+        identity: str,
+        limit: int | None = None,
+        window_seconds: int | None = None,
+    ) -> RateLimitResult:
+        algorithm = self.config.rate_limit_algorithm.lower().replace("-", "_")
+        if algorithm == "fixed_window":
+            return self.check_fixed_window_rate_limit(identity, limit, window_seconds)
+        if algorithm in {"token_bucket", "tokenbucket"}:
+            return self.check_token_bucket_rate_limit(identity, limit, window_seconds)
+        raise ValueError(f"Unsupported rate limit algorithm: {algorithm}")
+
+    def check_fixed_window_rate_limit(
         self,
         identity: str,
         limit: int | None = None,
@@ -299,6 +509,43 @@ class RedisService:
             limit=limit,
             remaining=remaining,
             reset_after_seconds=int(current_ttl),
+            key=key,
+        )
+
+    def check_token_bucket_rate_limit(
+        self,
+        identity: str,
+        limit: int | None = None,
+        window_seconds: int | None = None,
+    ) -> RateLimitResult:
+        if not identity.strip():
+            raise ValueError("Rate limit identity must not be empty.")
+
+        limit = limit or self.config.rate_limit
+        window_seconds = window_seconds or self.config.rate_window_seconds
+        if limit < 1:
+            raise ValueError("limit must be greater than zero.")
+        if window_seconds < 1:
+            raise ValueError("window_seconds must be greater than zero.")
+
+        key = self.key("rate", "token_bucket", identity)
+        refill_rate = limit / window_seconds
+        ttl_seconds = max(window_seconds * 2, 1)
+        allowed, remaining, reset_after = self.client.eval(
+            self._TOKEN_BUCKET_SCRIPT,
+            1,
+            key,
+            limit,
+            refill_rate,
+            time.time(),
+            ttl_seconds,
+            1,
+        )
+        return RateLimitResult(
+            allowed=bool(int(allowed)),
+            limit=limit,
+            remaining=max(int(remaining), 0),
+            reset_after_seconds=max(int(reset_after), 0),
             key=key,
         )
 
@@ -345,7 +592,7 @@ def build_parser() -> argparse.ArgumentParser:
     read_session_parser.add_argument("--limit", type=int)
 
     rate_parser = subparsers.add_parser(
-        "rate-check", help="Check fixed-window rate limit."
+        "rate-check", help="Check Redis-backed API rate limit."
     )
     add_redis_options(rate_parser)
     rate_parser.add_argument("--identity", required=True)
@@ -354,6 +601,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--window-seconds",
         type=int,
         default=DEFAULT_RATE_WINDOW_SECONDS,
+    )
+    rate_parser.add_argument(
+        "--algorithm",
+        choices=["token_bucket", "fixed_window"],
+        default=DEFAULT_RATE_LIMIT_ALGORITHM,
     )
 
     return parser
@@ -366,6 +618,9 @@ def service_from_args(args: argparse.Namespace) -> RedisService:
             port=args.redis_port,
             db=args.redis_db,
             key_prefix=args.key_prefix,
+            rate_limit_algorithm=getattr(
+                args, "algorithm", DEFAULT_RATE_LIMIT_ALGORITHM
+            ),
         )
     )
 

@@ -70,7 +70,9 @@ venv.bak/
 *.db
 *.log
 *.tmp
-/data/
+/data/*
+!/data/policies/
+!/data/policies/**
 /dbfs/
 /mlruns/
 /artifacts/

@@ -2,16 +2,22 @@
 #
 # Heavy ETL/training packages such as Spark, Delta, MLflow, scikit-learn, and
 # sentence-transformers stay in requirements.txt / environment.yml for local
-# development jobs. Keeping the API image lean makes docker compose boot quickly.
+# development/indexing jobs. The API image intentionally uses
+# SMARTSHOP_EMBEDDING_BACKEND=hashing in Compose/K8s so /search can boot without
+# downloading PyTorch; use sentence-transformers in a custom runtime image when
+# real semantic-search quality is required.
 fastapi>=0.100.0
 uvicorn>=0.22.0
 python-multipart>=0.0.6
+pyjwt[crypto]>=2.8.0
 
 qdrant-client>=1.3.0
 pandas>=2.0.0
 
 redis>=4.6.0
 kafka-python>=2.0.2
+langchain-core>=0.2.0
+langchain-openai>=0.1.0
 
 # Phase 10: Monitoring & Observability
 prometheus-fastapi-instrumentator>=6.1.0

@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: ${SMARTSHOP_API_BUILD_TARGET:-runtime}
     image: smartshop-api:latest
     container_name: smartshop-api
     ports:
@@ -10,19 +11,34 @@ services:
     environment:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      SMARTSHOP_ENV: ${SMARTSHOP_ENV:-dev}
       QDRANT_HOST: qdrant
       QDRANT_PORT: "6333"
       QDRANT_COLLECTION_NAME: products
-      SMARTSHOP_EMBEDDING_BACKEND: hashing
+      SMARTSHOP_EMBEDDING_BACKEND: ${SMARTSHOP_EMBEDDING_BACKEND:-hashing}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SMARTSHOP_CORS_ORIGINS: ${SMARTSHOP_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173}
       SMARTSHOP_JWT_SECRET: ${SMARTSHOP_JWT_SECRET:-dev-smartshop-secret}
+      SMARTSHOP_JWT_ISSUER: ${SMARTSHOP_JWT_ISSUER:-}
+      SMARTSHOP_JWT_AUDIENCE: ${SMARTSHOP_JWT_AUDIENCE:-}
+      SMARTSHOP_JWKS_URL: ${SMARTSHOP_JWKS_URL:-}
+      SMARTSHOP_JWT_ALGORITHMS: ${SMARTSHOP_JWT_ALGORITHMS:-RS256}
       SMARTSHOP_UPLOAD_DIR: /app/data/uploads/catalog
+      SMARTSHOP_ETL_OUTPUT_DIR: /app/data/processed/catalog_uploads
+      SMARTSHOP_ETL_OUTPUT_FORMAT: ${SMARTSHOP_ETL_OUTPUT_FORMAT:-parquet}
+      SMARTSHOP_ETL_SPARK_MASTER: ${SMARTSHOP_ETL_SPARK_MASTER:-local[*]}
+      SMARTSHOP_ETL_COMMAND: ${SMARTSHOP_ETL_COMMAND:-}
+      SMARTSHOP_AGENT_USE_LLM: ${SMARTSHOP_AGENT_USE_LLM:-auto}
+      SMARTSHOP_OPENAI_MODEL: ${SMARTSHOP_OPENAI_MODEL:-o4-mini}
+      SMARTSHOP_POLICY_SOURCE_PATH: /app/data/policies/smartshop_policy.md
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       # Phase 10: Langfuse LLM observability (set in .env to enable)
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
     volumes:
       - upload-data:/app/data/uploads/catalog
+      - processed-data:/app/data/processed/catalog_uploads
     depends_on:
       redis:
         condition: service_healthy
@@ -35,12 +51,51 @@ services:
         - CMD
         - python
         - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).read()"
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 30s
     restart: unless-stopped
+
+  vector-indexer:
+    profiles: ["indexer"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: vector-indexer
+    image: smartshop-vector-indexer:latest
+    container_name: smartshop-vector-indexer
+    environment:
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: "6333"
+      QDRANT_COLLECTION_NAME: products
+      SMARTSHOP_EMBEDDING_BACKEND: ${SMARTSHOP_INDEX_EMBEDDING_BACKEND:-hashing}
+      SMARTSHOP_VECTOR_SIZE: ${SMARTSHOP_VECTOR_SIZE:-384}
+    volumes:
+      - ./data/processed:/app/data/processed:ro
+    depends_on:
+      qdrant:
+        condition: service_started
+    command:
+      - python
+      - -m
+      - src.vector_store
+      - index
+      - --input-path
+      - ${SMARTSHOP_VECTOR_INPUT_PATH:-/app/data/processed/products_processed}
+      - --collection-name
+      - ${QDRANT_COLLECTION_NAME:-products}
+      - --embedding-backend
+      - ${SMARTSHOP_INDEX_EMBEDDING_BACKEND:-hashing}
+      - --embedding-model
+      - ${SMARTSHOP_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      - --vector-size
+      - ${SMARTSHOP_VECTOR_SIZE:-384}
+      - --qdrant-host
+      - qdrant
+      - --qdrant-port
+      - "6333"
 
   redis:
     image: redis:7-alpine
@@ -136,9 +191,9 @@ services:
 
 volumes:
   upload-data:
+  processed-data:
   redis-data:
   qdrant-data:
   kafka-data:
   prometheus-data:
   grafana-data:
-
