@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "frontend-design": {
+      "source": "factory-ai/factory-plugins",
+      "sourceType": "github",
+      "skillPath": "plugins/droid-evolved/skills/frontend-design/SKILL.md",
+      "computedHash": "16c1ece658c06e57b558f73bf962517f0f3bb1a4d6e4078d716d19ba509e6103"
+    }
+  }
+}

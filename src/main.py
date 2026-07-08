@@ -35,7 +35,7 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -63,7 +63,9 @@ DEFAULT_CORS_ALLOWED_ORIGINS = (
     "http://127.0.0.1:5173",
 )
 PUBLIC_PATH_PREFIXES = ("/docs", "/redoc", "/openapi.json")
-PUBLIC_PATHS = {"/health", "/health/ready"}
+PUBLIC_PATHS = {"/", "/health", "/health/ready"}
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+INDEX_HTML_PATH = STATIC_DIR / "index.html"
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -761,6 +763,16 @@ def get_current_user(
             detail=str(exc),
         ) from exc
     return CurrentUser(user_id=payload.sub, scopes=payload.scopes)
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def web_console() -> HTMLResponse:
+    if not INDEX_HTML_PATH.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Web console asset is missing.",
+        )
+    return HTMLResponse(INDEX_HTML_PATH.read_text(encoding="utf-8"))
 
 
 def enforce_rate_limit(

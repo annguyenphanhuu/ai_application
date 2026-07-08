@@ -1,0 +1,1185 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SmartShop AI Console</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f7f6f2;
+        --panel: #ffffff;
+        --panel-subtle: #faf9f6;
+        --ink: #171a17;
+        --muted: #6d746e;
+        --faint: #929991;
+        --line: #e5e2da;
+        --line-strong: #d4d0c6;
+        --primary: #0d6b55;
+        --primary-hover: #095844;
+        --primary-soft: #e8f4ef;
+        --success: #138354;
+        --danger: #b83b35;
+        --warning: #9b6b1d;
+        --radius: 8px;
+        --shadow: 0 24px 70px rgba(23, 26, 23, 0.08);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(247, 246, 242, 0) 360px),
+          var(--bg);
+        color: var(--ink);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        letter-spacing: 0;
+      }
+
+      button,
+      input,
+      textarea {
+        font: inherit;
+      }
+
+      button {
+        align-items: center;
+        border: 0;
+        border-radius: var(--radius);
+        cursor: pointer;
+        display: inline-flex;
+        font-weight: 650;
+        gap: 8px;
+        justify-content: center;
+        min-height: 40px;
+        padding: 0 14px;
+        transition:
+          background-color 140ms ease,
+          border-color 140ms ease,
+          color 140ms ease,
+          transform 140ms ease;
+      }
+
+      button.primary {
+        background: var(--primary);
+        color: #ffffff;
+      }
+
+      button.primary:hover {
+        background: var(--primary-hover);
+        transform: translateY(-1px);
+      }
+
+      button.secondary {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        color: var(--ink);
+      }
+
+      button.secondary:hover {
+        background: #f4f2ec;
+        border-color: var(--line-strong);
+      }
+
+      button.ghost {
+        background: transparent;
+        color: var(--muted);
+      }
+
+      button.ghost:hover {
+        background: #efede7;
+        color: var(--ink);
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+        transform: none;
+      }
+
+      input,
+      textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: #ffffff;
+        color: var(--ink);
+        outline: none;
+        padding: 10px 12px;
+        transition:
+          border-color 140ms ease,
+          box-shadow 140ms ease,
+          background-color 140ms ease;
+      }
+
+      input {
+        min-height: 40px;
+      }
+
+      textarea {
+        min-height: 116px;
+        resize: vertical;
+      }
+
+      input:focus,
+      textarea:focus,
+      button:focus-visible {
+        border-color: rgba(13, 107, 85, 0.72);
+        box-shadow: 0 0 0 4px rgba(13, 107, 85, 0.13);
+      }
+
+      label {
+        color: var(--muted);
+        display: grid;
+        font-size: 12px;
+        font-weight: 700;
+        gap: 8px;
+        letter-spacing: 0.02em;
+      }
+
+      pre {
+        margin: 0;
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+      }
+
+      .app {
+        display: grid;
+        grid-template-columns: 248px minmax(0, 1fr);
+        min-height: 100vh;
+      }
+
+      .sidebar {
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        gap: 24px;
+        min-height: 100vh;
+        padding: 24px;
+        position: sticky;
+        top: 0;
+      }
+
+      .logo {
+        display: grid;
+        gap: 8px;
+      }
+
+      .logo-mark {
+        align-items: center;
+        background: var(--ink);
+        border-radius: 8px;
+        color: #ffffff;
+        display: inline-flex;
+        font-size: 13px;
+        font-weight: 800;
+        height: 32px;
+        justify-content: center;
+        width: 32px;
+      }
+
+      .logo h1 {
+        font-size: 18px;
+        line-height: 1.15;
+        margin: 0;
+      }
+
+      .logo p {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+        margin: 0;
+      }
+
+      .nav {
+        display: grid;
+        gap: 6px;
+      }
+
+      .nav a {
+        align-items: center;
+        border-radius: var(--radius);
+        color: var(--muted);
+        display: flex;
+        font-size: 14px;
+        font-weight: 650;
+        min-height: 38px;
+        padding: 0 10px;
+        text-decoration: none;
+      }
+
+      .nav a:first-child,
+      .nav a:hover {
+        background: #efede7;
+        color: var(--ink);
+      }
+
+      .sidebar-footer {
+        border-top: 1px solid var(--line);
+        display: grid;
+        gap: 12px;
+        margin-top: auto;
+        padding-top: 18px;
+      }
+
+      .status-pill {
+        align-items: center;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        display: inline-flex;
+        font-size: 13px;
+        font-weight: 700;
+        gap: 8px;
+        min-height: 36px;
+        padding: 0 12px;
+        width: fit-content;
+      }
+
+      .dot {
+        background: var(--faint);
+        border-radius: 999px;
+        height: 8px;
+        width: 8px;
+      }
+
+      .dot.ok {
+        background: var(--success);
+      }
+
+      .dot.bad {
+        background: var(--danger);
+      }
+
+      .main {
+        min-width: 0;
+        padding: 24px;
+      }
+
+      .masthead {
+        align-items: end;
+        display: flex;
+        gap: 24px;
+        justify-content: space-between;
+        margin: 0 auto 20px;
+        max-width: 1240px;
+      }
+
+      .eyebrow {
+        color: var(--primary);
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        margin: 0 0 10px;
+        text-transform: uppercase;
+      }
+
+      .masthead h2 {
+        font-size: clamp(30px, 4vw, 48px);
+        line-height: 1;
+        margin: 0;
+        max-width: 720px;
+      }
+
+      .masthead p {
+        color: var(--muted);
+        font-size: 15px;
+        line-height: 1.6;
+        margin: 12px 0 0;
+        max-width: 680px;
+      }
+
+      .token-bar {
+        background: rgba(255, 255, 255, 0.72);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        display: grid;
+        gap: 10px;
+        min-width: 360px;
+        padding: 12px;
+      }
+
+      .token-actions {
+        display: grid;
+        gap: 8px;
+        grid-template-columns: 1fr auto auto;
+      }
+
+      .workspace {
+        display: grid;
+        gap: 18px;
+        grid-template-columns: minmax(0, 1.35fr) minmax(340px, 0.65fr);
+        margin: 0 auto;
+        max-width: 1240px;
+      }
+
+      .surface {
+        background: rgba(255, 255, 255, 0.88);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+      }
+
+      .chat-panel {
+        display: grid;
+        grid-template-rows: auto minmax(300px, 1fr) auto;
+        min-height: 720px;
+      }
+
+      .panel-head {
+        align-items: center;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        gap: 16px;
+        justify-content: space-between;
+        padding: 18px;
+      }
+
+      .panel-title {
+        min-width: 0;
+      }
+
+      .panel-title h3 {
+        font-size: 17px;
+        line-height: 1.2;
+        margin: 0;
+      }
+
+      .panel-title p {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+        margin: 5px 0 0;
+      }
+
+      .session-chip {
+        background: var(--panel-subtle);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 12px;
+        padding: 8px 10px;
+        white-space: nowrap;
+      }
+
+      .chat-log {
+        align-content: start;
+        display: grid;
+        gap: 12px;
+        overflow: auto;
+        padding: 18px;
+      }
+
+      .message {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        display: grid;
+        gap: 7px;
+        line-height: 1.55;
+        max-width: 82%;
+        padding: 12px 14px;
+      }
+
+      .message strong {
+        font-size: 12px;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+      }
+
+      .message.assistant {
+        background: var(--panel-subtle);
+      }
+
+      .message.user {
+        background: var(--primary);
+        border-color: var(--primary);
+        color: #ffffff;
+        justify-self: end;
+      }
+
+      .composer {
+        border-top: 1px solid var(--line);
+        display: grid;
+        gap: 12px;
+        padding: 18px;
+      }
+
+      .prompt-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .prompt-row button {
+        min-height: 34px;
+      }
+
+      .composer-actions {
+        align-items: center;
+        display: flex;
+        gap: 10px;
+        justify-content: space-between;
+      }
+
+      .hint {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .rail {
+        display: grid;
+        gap: 18px;
+      }
+
+      .tool {
+        display: grid;
+      }
+
+      .tool-head {
+        align-items: start;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        gap: 12px;
+        justify-content: space-between;
+        padding: 16px;
+      }
+
+      .tool-head h3 {
+        font-size: 16px;
+        margin: 0;
+      }
+
+      .tool-head p {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+        margin: 5px 0 0;
+      }
+
+      .tool-body {
+        display: grid;
+        gap: 12px;
+        padding: 16px;
+      }
+
+      .search-grid {
+        display: grid;
+        gap: 10px;
+        grid-template-columns: minmax(0, 1fr) 92px;
+      }
+
+      .result-list,
+      .approval-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .result,
+      .approval,
+      .empty,
+      .upload-output {
+        background: var(--panel-subtle);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        color: var(--ink);
+        padding: 12px;
+      }
+
+      .result {
+        align-items: flex-start;
+        display: grid;
+        gap: 4px;
+        min-height: auto;
+        text-align: left;
+        width: 100%;
+      }
+
+      .result:hover {
+        background: #f3f1ea;
+      }
+
+      .result strong,
+      .approval strong {
+        font-size: 14px;
+      }
+
+      .meta {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .empty {
+        color: var(--muted);
+        line-height: 1.5;
+        min-height: 78px;
+      }
+
+      .upload-drop {
+        align-items: center;
+        background: var(--panel-subtle);
+        border: 1px dashed var(--line-strong);
+        border-radius: var(--radius);
+        display: flex;
+        min-height: 82px;
+        padding: 14px;
+      }
+
+      .approval p {
+        color: var(--ink);
+        line-height: 1.5;
+        margin: 6px 0;
+      }
+
+      .approval-actions {
+        display: grid;
+        gap: 8px;
+        grid-template-columns: 1fr 1fr;
+        margin-top: 10px;
+      }
+
+      .toast {
+        border-radius: var(--radius);
+        display: none;
+        font-size: 13px;
+        font-weight: 700;
+        line-height: 1.45;
+        padding: 10px 12px;
+      }
+
+      .toast.show {
+        display: block;
+      }
+
+      .toast.ok {
+        background: #e3f5ec;
+        color: #0f6844;
+      }
+
+      .toast.bad {
+        background: #fde8e5;
+        color: #9f312b;
+      }
+
+      @media (max-width: 1100px) {
+        .app {
+          grid-template-columns: 1fr;
+        }
+
+        .sidebar {
+          background: rgba(247, 246, 242, 0.92);
+          min-height: auto;
+          position: static;
+        }
+
+        .nav {
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+        }
+
+        .sidebar-footer {
+          margin-top: 0;
+        }
+
+        .masthead {
+          align-items: stretch;
+          flex-direction: column;
+        }
+
+        .token-bar {
+          min-width: 0;
+        }
+
+        .workspace {
+          grid-template-columns: 1fr;
+        }
+
+        .chat-panel {
+          min-height: 620px;
+        }
+      }
+
+      @media (max-width: 680px) {
+        .main,
+        .sidebar {
+          padding: 18px;
+        }
+
+        .masthead h2 {
+          font-size: 32px;
+        }
+
+        .nav,
+        .token-actions,
+        .search-grid,
+        .approval-actions {
+          grid-template-columns: 1fr;
+        }
+
+        .panel-head,
+        .tool-head,
+        .composer-actions {
+          align-items: stretch;
+          flex-direction: column;
+        }
+
+        .message {
+          max-width: 100%;
+        }
+
+        .composer-actions button,
+        .tool-body button,
+        .token-actions button {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="logo">
+          <span class="logo-mark">SS</span>
+          <div>
+            <h1>SmartShop AI</h1>
+            <p>Control surface cho search, chat, catalog và human review.</p>
+          </div>
+        </div>
+
+        <nav class="nav" aria-label="Primary">
+          <a href="#assistant">Assistant</a>
+          <a href="#search">Search</a>
+          <a href="#catalog">Catalog</a>
+          <a href="#approvals">Approvals</a>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="status-pill" aria-live="polite">
+            <span id="healthDot" class="dot"></span>
+            <span id="healthText">Checking API</span>
+          </div>
+          <button class="secondary" id="openDocs" type="button">Open API docs</button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="masthead">
+          <div>
+            <p class="eyebrow">Production console</p>
+            <h2>Một workspace gọn để vận hành SmartShop AI.</h2>
+            <p>
+              Trò chuyện với agent, tìm kiếm catalog, upload dữ liệu mới và xử lý
+              những yêu cầu cần người duyệt trong cùng một màn hình.
+            </p>
+          </div>
+
+          <section class="token-bar" aria-label="Authentication">
+            <label>
+              Bearer token
+              <div class="token-actions">
+                <input
+                  id="tokenInput"
+                  autocomplete="off"
+                  placeholder="Paste token"
+                  type="password"
+                />
+                <button class="primary" id="saveToken" type="button">Save</button>
+                <button class="ghost" id="clearToken" type="button">Clear</button>
+              </div>
+            </label>
+            <div id="notice" class="toast" role="status"></div>
+          </section>
+        </header>
+
+        <div class="workspace">
+          <section id="assistant" class="surface chat-panel">
+            <div class="panel-head">
+              <div class="panel-title">
+                <h3>Shopping assistant</h3>
+                <p>Policy answers, product guidance and agent decisions stream here.</p>
+              </div>
+              <div class="session-chip" id="sessionChip">session</div>
+            </div>
+
+            <div id="chatLog" class="chat-log">
+              <div class="empty">
+                Bắt đầu bằng một câu hỏi về chính sách hoặc yêu cầu gợi ý sản phẩm.
+              </div>
+            </div>
+
+            <div class="composer">
+              <div class="prompt-row">
+                <button class="ghost quick-prompt" type="button">
+                  Chính sách giao hàng?
+                </button>
+                <button class="ghost quick-prompt" type="button">
+                  Tìm tai nghe chống ồn dưới 200 USD
+                </button>
+                <button class="ghost quick-prompt" type="button">
+                  Tôi muốn hoàn tiền đơn bị hỏng
+                </button>
+              </div>
+              <label>
+                Message
+                <textarea
+                  id="chatMessage"
+                  placeholder="Ask the assistant about products, policies or support cases..."
+                ></textarea>
+              </label>
+              <div class="composer-actions">
+                <span class="hint">Streaming response qua endpoint /chat.</span>
+                <div class="prompt-row">
+                  <button class="secondary" id="newSession" type="button">New session</button>
+                  <button class="primary" id="sendChat" type="button">Send message</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <aside class="rail">
+            <section id="search" class="surface tool">
+              <div class="tool-head">
+                <div>
+                  <h3>Product search</h3>
+                  <p>Query vector search and log clicks from selected products.</p>
+                </div>
+              </div>
+              <div class="tool-body">
+                <label>
+                  Query
+                  <input id="searchQuery" placeholder="headphones" />
+                </label>
+                <div class="search-grid">
+                  <label>
+                    Category
+                    <input id="searchCategory" placeholder="Electronics" />
+                  </label>
+                  <label>
+                    Top K
+                    <input id="searchTopK" min="1" max="50" type="number" value="5" />
+                  </label>
+                </div>
+                <button class="primary" id="runSearch" type="button">Search products</button>
+                <div id="searchResults" class="result-list">
+                  <div class="empty">Search results will appear here.</div>
+                </div>
+              </div>
+            </section>
+
+            <section id="catalog" class="surface tool">
+              <div class="tool-head">
+                <div>
+                  <h3>Catalog upload</h3>
+                  <p>Submit CSV data to the ETL pipeline.</p>
+                </div>
+              </div>
+              <div class="tool-body">
+                <label class="upload-drop">
+                  <input id="catalogFile" accept=".csv,text/csv" type="file" />
+                </label>
+                <button class="primary" id="uploadCatalog" type="button">Upload CSV</button>
+                <div id="uploadResult" class="empty">Upload status will appear here.</div>
+              </div>
+            </section>
+
+            <section id="approvals" class="surface tool">
+              <div class="tool-head">
+                <div>
+                  <h3>Human approvals</h3>
+                  <p>Review pending escalations from the assistant.</p>
+                </div>
+                <button class="secondary" id="loadApprovals" type="button">Refresh</button>
+              </div>
+              <div class="tool-body">
+                <div id="approvalList" class="approval-list">
+                  <div class="empty">Pending approvals will appear here.</div>
+                </div>
+              </div>
+            </section>
+          </aside>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      const $ = (selector) => document.querySelector(selector);
+      const state = {
+        token: localStorage.getItem("smartshop_token") || "",
+        sessionId: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+      };
+
+      const notice = $("#notice");
+      $("#tokenInput").value = state.token;
+      updateSessionChip();
+
+      function showNotice(message, type = "ok") {
+        notice.textContent = message;
+        notice.className = `toast show ${type}`;
+        window.setTimeout(() => {
+          notice.className = "toast";
+        }, 3200);
+      }
+
+      function requireToken() {
+        const token = $("#tokenInput").value.trim();
+        if (!token) {
+          throw new Error("Nhập Bearer token trước khi gọi API.");
+        }
+        return token;
+      }
+
+      function authHeaders(extra = {}) {
+        return {
+          ...extra,
+          Authorization: `Bearer ${requireToken()}`,
+        };
+      }
+
+      function setBusy(button, busy, text) {
+        button.disabled = busy;
+        if (busy) {
+          button.dataset.idleText = button.textContent;
+          button.textContent = text;
+        } else {
+          button.textContent = button.dataset.idleText || button.textContent;
+        }
+      }
+
+      function renderJson(target, payload) {
+        target.className = "upload-output";
+        target.innerHTML = `<pre>${escapeHtml(JSON.stringify(payload, null, 2))}</pre>`;
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function updateSessionChip() {
+        $("#sessionChip").textContent = `session ${state.sessionId.slice(0, 8)}`;
+      }
+
+      async function checkHealth() {
+        try {
+          const response = await fetch("/health");
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          $("#healthDot").className = "dot ok";
+          $("#healthText").textContent = "API ready";
+        } catch (error) {
+          $("#healthDot").className = "dot bad";
+          $("#healthText").textContent = "API offline";
+        }
+      }
+
+      function appendMessage(role, text) {
+        const chatLog = $("#chatLog");
+        if (chatLog.querySelector(".empty")) {
+          chatLog.innerHTML = "";
+        }
+        const item = document.createElement("div");
+        item.className = `message ${role === "user" ? "user" : "assistant"}`;
+        item.innerHTML = `<strong>${role === "user" ? "Bạn" : "SmartShop AI"}</strong><span>${escapeHtml(text)}</span>`;
+        chatLog.appendChild(item);
+        chatLog.scrollTop = chatLog.scrollHeight;
+        return item.querySelector("span");
+      }
+
+      async function sendChat() {
+        const button = $("#sendChat");
+        const message = $("#chatMessage").value.trim();
+        if (!message) {
+          showNotice("Nhập nội dung chat trước khi gửi.", "bad");
+          return;
+        }
+
+        try {
+          setBusy(button, true, "Sending...");
+          appendMessage("user", message);
+          $("#chatMessage").value = "";
+          const assistantMessage = appendMessage("assistant", "Đang suy nghĩ...");
+          const response = await fetch("/chat", {
+            method: "POST",
+            headers: authHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify({
+              message,
+              session_id: state.sessionId,
+            }),
+          });
+          if (!response.ok) {
+            throw new Error(await response.text());
+          }
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let streamed = "";
+          assistantMessage.textContent = "";
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+              break;
+            }
+            buffer += decoder.decode(value, { stream: true });
+            const events = buffer.split("\n\n");
+            buffer = events.pop() || "";
+            for (const eventBlock of events) {
+              const event = parseSse(eventBlock);
+              if (!event.data) {
+                continue;
+              }
+              const payload = JSON.parse(event.data);
+              if (event.name === "chunk" && payload.content) {
+                streamed += `${payload.content} `;
+                assistantMessage.textContent = streamed.trim();
+              }
+              if (event.name === "done" && payload.content) {
+                assistantMessage.textContent = payload.content;
+              }
+            }
+          }
+        } catch (error) {
+          showNotice(error.message, "bad");
+        } finally {
+          setBusy(button, false);
+        }
+      }
+
+      function parseSse(block) {
+        return block.split("\n").reduce(
+          (event, line) => {
+            if (line.startsWith("event:")) {
+              event.name = line.slice(6).trim();
+            }
+            if (line.startsWith("data:")) {
+              event.data = line.slice(5).trim();
+            }
+            return event;
+          },
+          { name: "message", data: "" },
+        );
+      }
+
+      async function runSearch() {
+        const button = $("#runSearch");
+        const query = $("#searchQuery").value.trim();
+        if (!query) {
+          showNotice("Nhập từ khóa tìm kiếm.", "bad");
+          return;
+        }
+
+        const params = new URLSearchParams({
+          query,
+          top_k: $("#searchTopK").value || "5",
+        });
+        const category = $("#searchCategory").value.trim();
+        if (category) {
+          params.set("category", category);
+        }
+
+        try {
+          setBusy(button, true, "Searching...");
+          const response = await fetch(`/search?${params}`, {
+            headers: authHeaders(),
+          });
+          if (!response.ok) {
+            throw new Error(await response.text());
+          }
+          const payload = await response.json();
+          const results = $("#searchResults");
+          if (!payload.results.length) {
+            results.innerHTML = '<div class="empty">Không tìm thấy sản phẩm phù hợp.</div>';
+            return;
+          }
+          results.innerHTML = payload.results
+            .map((item) => {
+              const title = item.title || item.name || item.product_id || "Sản phẩm";
+              const price = item.price ? ` · ${item.price}` : "";
+              const score = item.score ? `Score ${Number(item.score).toFixed(2)}` : payload.source;
+              return `
+                <button class="result" type="button" data-product-id="${escapeHtml(item.product_id || "")}">
+                  <strong>${escapeHtml(title)}</strong>
+                  <span class="meta">${escapeHtml(score)}${escapeHtml(price)}</span>
+                </button>
+              `;
+            })
+            .join("");
+        } catch (error) {
+          showNotice(error.message, "bad");
+        } finally {
+          setBusy(button, false);
+        }
+      }
+
+      async function uploadCatalog() {
+        const button = $("#uploadCatalog");
+        const file = $("#catalogFile").files[0];
+        if (!file) {
+          showNotice("Chọn file CSV trước khi upload.", "bad");
+          return;
+        }
+
+        const body = new FormData();
+        body.append("file", file);
+        try {
+          setBusy(button, true, "Uploading...");
+          const response = await fetch("/upload", {
+            method: "POST",
+            headers: authHeaders(),
+            body,
+          });
+          if (!response.ok) {
+            throw new Error(await response.text());
+          }
+          renderJson($("#uploadResult"), await response.json());
+        } catch (error) {
+          showNotice(error.message, "bad");
+        } finally {
+          setBusy(button, false);
+        }
+      }
+
+      async function loadApprovals() {
+        const button = $("#loadApprovals");
+        try {
+          setBusy(button, true, "Loading...");
+          const response = await fetch("/approvals/pending", {
+            headers: authHeaders(),
+          });
+          if (!response.ok) {
+            throw new Error(await response.text());
+          }
+          const payload = await response.json();
+          const approvals = $("#approvalList");
+          if (!payload.requests.length) {
+            approvals.innerHTML = '<div class="empty">Không có yêu cầu nào đang chờ duyệt.</div>';
+            return;
+          }
+          approvals.innerHTML = payload.requests
+            .map(
+              (request) => `
+                <div class="approval">
+                  <strong>${escapeHtml(request.request_id)}</strong>
+                  <p>${escapeHtml(request.message)}</p>
+                  <div class="meta">${escapeHtml(request.reason || "Đang chờ duyệt")}</div>
+                  <div class="approval-actions">
+                    <button class="primary" type="button" data-action="approve" data-id="${escapeHtml(request.request_id)}">Approve</button>
+                    <button class="secondary" type="button" data-action="reject" data-id="${escapeHtml(request.request_id)}">Reject</button>
+                  </div>
+                </div>
+              `,
+            )
+            .join("");
+        } catch (error) {
+          showNotice(error.message, "bad");
+        } finally {
+          setBusy(button, false);
+        }
+      }
+
+      async function resolveApproval(id, approved) {
+        try {
+          const response = await fetch(`/approvals/${encodeURIComponent(id)}/resolve`, {
+            method: "POST",
+            headers: authHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify({
+              approved,
+              note: approved ? "Approved from web console" : "Rejected from web console",
+            }),
+          });
+          if (!response.ok) {
+            throw new Error(await response.text());
+          }
+          showNotice(approved ? "Đã duyệt yêu cầu." : "Đã từ chối yêu cầu.");
+          await loadApprovals();
+        } catch (error) {
+          showNotice(error.message, "bad");
+        }
+      }
+
+      $("#saveToken").addEventListener("click", () => {
+        state.token = $("#tokenInput").value.trim();
+        localStorage.setItem("smartshop_token", state.token);
+        showNotice("Đã lưu token trên trình duyệt.");
+      });
+
+      $("#clearToken").addEventListener("click", () => {
+        state.token = "";
+        $("#tokenInput").value = "";
+        localStorage.removeItem("smartshop_token");
+        showNotice("Đã xóa token.");
+      });
+
+      $("#openDocs").addEventListener("click", () => {
+        window.open("/docs", "_blank", "noopener");
+      });
+
+      $("#newSession").addEventListener("click", () => {
+        state.sessionId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+        updateSessionChip();
+        $("#chatLog").innerHTML = '<div class="empty">Đã tạo session mới.</div>';
+      });
+
+      document.querySelectorAll(".quick-prompt").forEach((button) => {
+        button.addEventListener("click", () => {
+          $("#chatMessage").value = button.textContent.trim();
+          $("#chatMessage").focus();
+        });
+      });
+
+      $("#sendChat").addEventListener("click", sendChat);
+      $("#runSearch").addEventListener("click", runSearch);
+      $("#uploadCatalog").addEventListener("click", uploadCatalog);
+      $("#loadApprovals").addEventListener("click", loadApprovals);
+
+      $("#searchResults").addEventListener("click", async (event) => {
+        const productId = event.target.closest("[data-product-id]")?.dataset.productId;
+        if (!productId) {
+          return;
+        }
+        try {
+          await fetch("/events/click", {
+            method: "POST",
+            headers: authHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify({
+              user_id: "web-console",
+              product_id: productId,
+              session_id: state.sessionId,
+              query: $("#searchQuery").value.trim(),
+              metadata: { source: "web_console" },
+            }),
+          });
+        } catch (error) {
+          showNotice(error.message, "bad");
+        }
+      });
+
+      $("#approvalList").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-action]");
+        if (!button) {
+          return;
+        }
+        resolveApproval(button.dataset.id, button.dataset.action === "approve");
+      });
+
+      checkHealth();
+    </script>
+  </body>
+</html>

@@ -272,6 +272,16 @@ def test_health_is_public():
     assert response.json() == {"status": "ok"}
 
 
+def test_web_console_is_public():
+    client = build_client()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "SmartShop AI Console" in response.text
+
+
 def test_readiness_checks_redis():
     client = build_client(cache=FakeCacheService(redis_available=True))
 
