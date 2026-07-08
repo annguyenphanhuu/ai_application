@@ -1,0 +1,366 @@
+{
+  "__inputs": [],
+  "__requires": [
+    {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0"},
+    {"type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0"},
+    {"type": "panel", "id": "timeseries", "name": "Time series", "version": ""},
+    {"type": "panel", "id": "stat", "name": "Stat", "version": ""},
+    {"type": "panel", "id": "gauge", "name": "Gauge", "version": ""}
+  ],
+  "annotations": {"list": []},
+  "description": "SmartShop AI Platform - API & LLM Observability Dashboard (Phase 10)",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 100,
+      "title": "API Health",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.5},
+              {"color": "red", "value": 1.0}
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 1},
+      "id": 1,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "colorMode": "background"},
+      "title": "Request Rate (req/s)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum(rate(http_requests_total[1m]))",
+          "legendFormat": "req/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.01},
+              {"color": "red", "value": 0.05}
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 1},
+      "id": 2,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "colorMode": "background"},
+      "title": "Error Rate (5xx)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum(rate(http_requests_total{status_code=~\"5..\"}[1m])) / sum(rate(http_requests_total[1m]))",
+          "legendFormat": "error rate",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"unit": "s", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 1},
+      "id": 3,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "colorMode": "value"},
+      "title": "P95 API Latency",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}},
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 1},
+      "id": 4,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "colorMode": "background"},
+      "title": "Total Chat Requests",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "smartshop_chat_requests_total",
+          "legendFormat": "chat total",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "id": 101,
+      "title": "API Latency Details",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"unit": "s", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "id": 5,
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+      "title": "HTTP Request Latency Percentiles",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "id": 6,
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+      "title": "Request Rate by Handler",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (handler) (rate(http_requests_total[1m]))",
+          "legendFormat": "{{handler}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 14},
+      "id": 102,
+      "title": "SmartShop Business Metrics",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 15},
+      "id": 7,
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+      "title": "Search Requests by Source (cache vs vector_store)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (source) (rate(smartshop_search_requests_total[1m]))",
+          "legendFormat": "{{source}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"unit": "s", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 15},
+      "id": 8,
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+      "title": "Search Latency P95",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(smartshop_search_latency_seconds_bucket[5m])))",
+          "legendFormat": "search p95",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 23},
+      "id": 103,
+      "title": "LLM Observability (Token Usage & Latency)",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "id": 9,
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+      "title": "LLM Token Consumption Rate",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (type) (rate(smartshop_llm_tokens_total[5m]))",
+          "legendFormat": "{{type}} tokens/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"unit": "s", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "id": 10,
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+      "title": "LLM Call Latency",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(smartshop_llm_latency_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(smartshop_llm_latency_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 32},
+      "id": 104,
+      "title": "Kafka Event Throughput (Phase 5)",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 33},
+      "id": 11,
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+      "title": "Click Events Rate by Status",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (status) (rate(smartshop_click_events_total[1m]))",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 0.01}]}},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 33},
+      "id": 12,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "colorMode": "background"},
+      "title": "Dead-Letter Topic Rate (DLQ)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "rate(smartshop_click_events_dlq_total[5m])",
+          "legendFormat": "dlq/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"unit": "s", "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.05}, {"color": "red", "value": 0.1}]}},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 33},
+      "id": 13,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "colorMode": "background"},
+      "title": "Click Event Publish Latency P95",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(smartshop_click_event_latency_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["smartshop", "ai", "production"],
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "SmartShop AI Platform – Phase 10",
+  "uid": "smartshop-phase10",
+  "version": 2
+}
+

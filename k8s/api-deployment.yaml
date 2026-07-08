@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smartshop-api
+  labels:
+    app: smartshop-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: smartshop-api
+  template:
+    metadata:
+      labels:
+        app: smartshop-api
+    spec:
+      containers:
+        - name: api
+          image: smartshop-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: QDRANT_HOST
+              value: qdrant
+            - name: QDRANT_PORT
+              value: "6333"
+            - name: QDRANT_COLLECTION_NAME
+              value: products
+            - name: SMARTSHOP_EMBEDDING_BACKEND
+              value: hashing
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: kafka:9092
+            - name: SMARTSHOP_UPLOAD_DIR
+              value: /app/data/uploads/catalog
+            - name: SMARTSHOP_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: smartshop-api-secret
+                  key: jwt-secret
+                  optional: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi

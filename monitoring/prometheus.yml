@@ -1,0 +1,32 @@
+global:
+  scrape_interval: 15s       # Scrape mỗi 15 giây
+  evaluation_interval: 15s   # Evaluate rules mỗi 15 giây
+  scrape_timeout: 10s
+
+# Alertmanager (tùy chọn, bỏ qua nếu chưa cần)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ['alertmanager:9093']
+
+scrape_configs:
+  # Prometheus tự scrape chính nó
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # SmartShop FastAPI application metrics
+  - job_name: "smartshop-api"
+    metrics_path: /metrics
+    scrape_interval: 10s
+    static_configs:
+      - targets: ["api:8000"]
+    # Thêm label để phân biệt môi trường
+    relabel_configs:
+      - target_label: environment
+        replacement: local
+
+  # Redis metrics (cần redis-exporter nếu muốn chi tiết hơn)
+  # - job_name: "redis"
+  #   static_configs:
+  #     - targets: ["redis-exporter:9121"]

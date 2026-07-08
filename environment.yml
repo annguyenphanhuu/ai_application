@@ -1,0 +1,31 @@
+name: smartshop-ai
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip>=24
+  - openjdk=17
+  - pandas>=2.0
+  - numpy>=1.23
+  - pyarrow>=14
+  - scikit-learn>=1.2
+  - pyspark>=3.4
+  - mlflow>=3.0
+  - fastapi>=0.100
+  - uvicorn>=0.22
+  - python-multipart>=0.0.6
+  - httpx>=0.24
+  - importlib-metadata>=8.0
+  - pytest>=7.0
+  - pytest-cov>=4.0
+  - black>=23.0
+  - flake8>=6.0
+  - pip:
+      - delta-spark>=2.4.0
+      - qdrant-client>=1.7.0
+      - sentence-transformers>=2.2.2
+      - kafka-python>=2.0.2
+      - redis>=4.6.0
+      - langchain-core>=0.2.0
+      - langchain-openai>=0.1.0
+      - langgraph>=0.0.10

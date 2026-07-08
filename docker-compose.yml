@@ -1,0 +1,144 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: smartshop-api:latest
+    container_name: smartshop-api
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: "6333"
+      QDRANT_COLLECTION_NAME: products
+      SMARTSHOP_EMBEDDING_BACKEND: hashing
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SMARTSHOP_JWT_SECRET: ${SMARTSHOP_JWT_SECRET:-dev-smartshop-secret}
+      SMARTSHOP_UPLOAD_DIR: /app/data/uploads/catalog
+      # Phase 10: Langfuse LLM observability (set in .env to enable)
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+    volumes:
+      - upload-data:/app/data/uploads/catalog
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      kafka:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: smartshop-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.10.1
+    container_name: smartshop-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+
+  kafka:
+    image: apache/kafka:3.7.2
+    container_name: smartshop-kafka
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka-data:/tmp/kraft-combined-logs
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # Phase 10: Prometheus – scrapes /metrics từ smartshop-api
+  # -------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: smartshop-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.enable-lifecycle"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # Phase 10: Grafana – dashboard visualisation (http://localhost:3000)
+  # Default credentials: admin / admin (change via GF_SECURITY_ADMIN_PASSWORD)
+  # -------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.4.3
+    container_name: smartshop-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/provisioning/dashboards/smartshop_dashboard.json
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  upload-data:
+  redis-data:
+  qdrant-data:
+  kafka-data:
+  prometheus-data:
+  grafana-data:
+

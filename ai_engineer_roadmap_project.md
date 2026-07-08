@@ -173,69 +173,85 @@ python -m jobs.spark_etl \
 ls -la data/processed/products_processed
 ```
 
+#### Ghi Chú Chạy Project Bằng Conda Trên PowerShell
+
+Nếu muốn chạy project trực tiếp trên PowerShell thay vì dùng WSL, hãy dùng Conda environment riêng để tránh làm bẩn môi trường `base`:
+
+```powershell
+cd D:\ANNGUYEN\Project\AI_Application
+conda env create -f environment.yml
+conda activate smartshop-ai
+python -m pytest
+```
+
+Nếu đã tạo env trước đó và muốn cập nhật theo `environment.yml` mới:
+
+```powershell
+conda activate smartshop-ai
+conda env update -f environment.yml --prune
+```
+
+Chạy Phase 3 trên PowerShell:
+
+```powershell
+python -m src.train `
+  --input-path data/processed/products_processed `
+  --tracking-uri sqlite:///mlflow.db `
+  --experiment-name SmartShop_Rating_Classification `
+  --model-name SmartShopRatingClassifier
+mlflow ui --backend-store-uri sqlite:///mlflow.db
+```
+
+Lưu ý: Spark local trên Windows vẫn có thể cần `HADOOP_HOME` và `winutils.exe` khi ghi Parquet/Delta. Nếu chưa cấu hình Hadoop helper, ưu tiên chạy ETL Phase 2 bằng Ubuntu WSL như hướng dẫn phía trên; Conda PowerShell phù hợp nhất để chạy unit test, Phase 3 training và MLflow UI.
+
 ---
 
 ### Phase 3: Experiment Tracking & Model Registry
-**Mục tiêu**: Xây dựng mô hình phân tích cảm xúc đánh giá sản phẩm (Sentiment Analysis) hoặc dự đoán xếp hạng (Rating Prediction) và quản lý vòng đời mô hình.
+**Mục tiêu**: Huấn luyện baseline model từ dữ liệu processed của Phase 2, log thí nghiệm bằng MLflow và tạo nền tảng để so sánh các model nâng cao ở những vòng sau.
 
-*   **Công nghệ sử dụng**: MLflow (được tích hợp sẵn trong Databricks).
+*   **Công nghệ sử dụng**: Scikit-learn, Pandas, PyArrow, MLflow.
 *   **Các bước thực hiện**:
-    1. Huấn luyện mô hình phân loại Sentiment dựa trên dữ liệu đánh giá sản phẩm sử dụng Scikit-learn hoặc Hugging Face Transformers.
-    2. Sử dụng MLflow để log các thông số (hyperparameters), độ đo đánh giá (Accuracy, F1-Score) và lưu trữ file model artifact.
-    3. Đăng ký (Register) mô hình tốt nhất vào MLflow Model Registry để quản lý phiên bản (Staging vs. Production).
+    1. Đọc bảng `data/processed/products_processed` do Phase 2 sinh ra.
+    2. Tạo text feature từ `title`, `description`, `brand`, `category`, `price_tier`.
+    3. Tạo nhãn baseline: `avg_rating >= 4.0` là sản phẩm rating cao.
+    4. Train pipeline `TfidfVectorizer + LogisticRegression`.
+    5. Log params, metrics và model artifact vào MLflow local (`sqlite:///mlflow.db`); có thể bật đăng ký model bằng `--register-model` khi cần.
 
-#### Code Minh Họa: Train & Track Model với MLflow (`src/train.py`)
-```python
-import mlflow
-import mlflow.sklearn
-from sklearn.model_selection import train_test_split
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score
-import pandas as pd
+#### Cách Chạy Phase 3 (`src/train.py`)
+```bash
+python -m pip install -r requirements.txt
+python -m src.train \
+  --input-path data/processed/products_processed \
+  --tracking-uri sqlite:///mlflow.db \
+  --experiment-name SmartShop_Rating_Classification \
+  --model-name SmartShopRatingClassifier \
+  --register-model \
+  --registry-alias candidate
+mlflow ui --backend-store-uri sqlite:///mlflow.db
+```
 
-def train_sentiment_model():
-    # Giả lập dữ liệu reviews đọc từ Delta Lake
-    data = {
-        "review_text": ["Great product, highly recommend!", "Terrible quality, broke instantly.", "Okay for the price.", "Loved it!"],
-        "sentiment": [1, 0, 0, 1]
-    }
-    df = pd.DataFrame(data)
+#### MLflow Model Registry Workflow
+Sau khi train xong, model version mới sẽ được đăng ký dưới tên
+`SmartShopRatingClassifier` và gắn alias `candidate`. Mở MLflow UI để so sánh
+metrics; khi muốn chọn model tốt nhất cho các phase API/deployment, promote
+candidate thành champion:
 
-    X_train, X_test, y_train, y_test = train_test_split(df["review_text"], df["sentiment"], test_size=0.2, random_state=42)
+```bash
+python -m src.model_registry list \
+  --tracking-uri sqlite:///mlflow.db \
+  --model-name SmartShopRatingClassifier
 
-    # Cấu hình MLflow Experiment
-    mlflow.set_experiment("/SmartShop_Sentiment_Analysis")
+python -m src.model_registry promote \
+  --tracking-uri sqlite:///mlflow.db \
+  --model-name SmartShopRatingClassifier \
+  --source-alias candidate \
+  --alias champion
+```
 
-    with mlflow.start_run():
-        # Feature extraction
-        vectorizer = TfidfVectorizer(max_features=1000)
-        X_train_vec = vectorizer.fit_transform(X_train)
-        X_test_vec = vectorizer.transform(X_test)
+Các phase sau có thể load model production bằng URI:
 
-        # Train model
-        c_param = 1.0
-        model = LogisticRegression(C=c_param)
-        model.fit(X_train_vec, y_train)
-
-        # Dự đoán & Đánh giá
-        predictions = model.predict(X_test_vec)
-        acc = accuracy_score(y_test, predictions)
-        f1 = f1_score(y_test, predictions, average='weighted')
-
-        # Log parameters & metrics lên MLflow
-        mlflow.log_param("C", c_param)
-        mlflow.log_param("max_features", 1000)
-        mlflow.log_metric("accuracy", acc)
-        mlflow.log_metric("f1_score", f1)
-
-        # Log Model & Vectorizer
-        mlflow.sklearn.log_model(model, "sentiment_model", registered_model_name="SmartShopSentimentClassifier")
-        
-        print(f"Model logged with accuracy: {acc}")
-
-if __name__ == "__main__":
-    train_sentiment_model()
+```text
+models:/SmartShopRatingClassifier@champion
 ```
 
 ---
@@ -338,6 +354,45 @@ if __name__ == "__main__":
 
 ---
 
+#### Ghi Chú Triển Khai Phase 4 Trong Repo
+
+Phần hiện thực nằm trong `src/vector_store.py`, gồm:
+
+* `VectorSearchService`: khởi tạo collection, index sản phẩm và semantic search.
+* `SentenceTransformerEncoder`: sinh embedding bằng `sentence-transformers/all-MiniLM-L6-v2`.
+* `QdrantVectorBackend`: adapter Qdrant, hỗ trợ tạo collection và upsert/search vector.
+* `ProductSearchFilters`: lọc kết quả theo `category`, `brand`, `min_price`, `max_price`.
+
+Chạy Qdrant local bằng Docker:
+
+```bash
+docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+```
+
+Index dữ liệu đã xử lý từ Phase 2:
+
+```bash
+python -m src.vector_store index \
+  --input-path data/processed/products_processed \
+  --collection-name products
+```
+
+Truy vấn semantic search:
+
+```bash
+python -m src.vector_store search "noise cancelling headphones" \
+  --category Electronics \
+  --top-k 5
+```
+
+Kiểm thử Phase 4 không cần Qdrant server thật:
+
+```bash
+python -m pytest tests/test_vector_store_phase4.py
+```
+
+---
+
 ### Phase 5: Real-time Ingestion & Messaging (Optional nhưng tích hợp)
 **Mục tiêu**: Xử lý dữ liệu tương tác của người dùng (Clickstream, Search Query) theo thời gian thực để phân tích hành vi và cập nhật danh sách "sản phẩm hot".
 
@@ -386,6 +441,43 @@ if __name__ == "__main__":
     pass
 ```
 
+#### Ghi Chu Trien Khai Phase 5 Trong Repo
+
+Phan hien thuc nam trong `src/streaming.py`, gom:
+
+* `ClickEvent`: schema va validation cho event click/search cua user.
+* `KafkaClickEventProducer`: producer gui event vao topic `user-clicks`.
+* `ClickEventConsumer`: consumer doc Kafka message va cap nhat thong ke realtime.
+* `RedisHotProductsStore`: luu bang xep hang san pham hot bang Redis sorted set.
+
+Chay Kafka va Redis local, sau do gui mot event click:
+
+```bash
+python -m src.streaming produce \
+  --user-id U01 \
+  --product-id P01 \
+  --session-id S01 \
+  --query "noise cancelling headphones"
+```
+
+Chay consumer nen de cap nhat hot products:
+
+```bash
+python -m src.streaming consume
+```
+
+Xem top san pham hot tu Redis:
+
+```bash
+python -m src.streaming top --limit 10
+```
+
+Kiem thu Phase 5 khong can Kafka/Redis that:
+
+```bash
+python -m pytest tests/test_streaming_phase5.py
+```
+
 ---
 
 ### Phase 6: Cache, Session & Queue Layer
@@ -429,6 +521,52 @@ class RedisService:
             pipe.expire(key, window)
         pipe.execute()
         return True
+```
+
+#### Ghi Chu Trien Khai Phase 6 Trong Repo
+
+Phan hien thuc nam trong `src/cache_service.py`, gom:
+
+* `RedisService`: helper dung chung cho cache search, session memory va fixed-window rate limiting.
+* `RedisConfig`: cau hinh host/port/db, key prefix, TTL cache/session va gioi han rate limit mac dinh.
+* `SessionMessage`: schema message hoi thoai luu trong Redis list theo tung `session_id`.
+* `RateLimitResult`: ket qua rate limit gom `allowed`, `remaining` va `reset_after_seconds`.
+
+Cache ket qua search:
+
+```bash
+python -m src.cache_service cache-set \
+  --query "noise cancelling headphones" \
+  --results-json '[{"product_id":"P01","score":0.91}]'
+
+python -m src.cache_service cache-get \
+  --query "noise cancelling headphones"
+```
+
+Luu va doc session hoi thoai:
+
+```bash
+python -m src.cache_service session-add \
+  --session-id S01 \
+  --role user \
+  --content "show me wireless headphones"
+
+python -m src.cache_service session-get --session-id S01
+```
+
+Kiem tra rate limit:
+
+```bash
+python -m src.cache_service rate-check \
+  --identity 127.0.0.1 \
+  --limit 10 \
+  --window-seconds 60
+```
+
+Kiem thu Phase 6 khong can Redis server that:
+
+```bash
+python -m pytest tests/test_cache_service_phase6.py
 ```
 
 ---
@@ -587,6 +725,46 @@ async def chat_stream(message: str):
 
 ---
 
+#### Ghi Chu Trien Khai Phase 8 Trong Repo
+
+Phan hien thuc nam trong `src/main.py`, gom:
+
+* `create_app`: FastAPI app factory ho tro inject fake Redis/Qdrant/Agent cho test.
+* `/search`: tim kiem san pham bang Qdrant, cache ket qua bang Redis va ho tro filter `category`, `brand`, `min_price`, `max_price`.
+* `/chat` va `/chat/stream`: Server-Sent Events streaming ket qua tu `SmartShopAgent`, dong thoi luu session memory vao Redis khi co `session_id`.
+* `/upload` va `/catalog/upload`: nhan file CSV catalog, luu vao `data/uploads/catalog` va tao manifest de pipeline ETL co the xu ly tiep.
+* Authentication bang Bearer JWT HS256 va fixed-window rate limit qua Redis.
+
+Tao token local de goi API tu Python:
+
+```bash
+python - <<'PY'
+from src.main import create_access_token
+print(create_access_token("admin-user"))
+PY
+```
+
+Chay API:
+
+```bash
+uvicorn src.main:app --reload
+```
+
+Goi search co authentication:
+
+```bash
+curl -H "Authorization: Bearer <TOKEN>" \
+  "http://localhost:8000/search?query=noise%20cancelling%20headphones&category=Electronics&top_k=5"
+```
+
+Kiem thu Phase 8 khong can Redis/Qdrant that:
+
+```bash
+python -m pytest tests/test_api_phase8.py
+```
+
+---
+
 ### Phase 9: Containerization & Orchestration
 **Mục tiêu**: Đóng gói toàn bộ mã nguồn cùng thư viện phụ thuộc thành các Docker Container chuẩn hóa và vận hành chúng thông qua Kubernetes (K8s).
 
@@ -663,6 +841,54 @@ spec:
     app: smartshop-api
 ```
 
+#### Ghi Chu Trien Khai Phase 9 Trong Repo
+
+Phan hien thuc nam trong cac file:
+
+* `Dockerfile`: multi-stage image Python 3.11, cai dependencies trong virtualenv, chay non-root user `smartshop`, expose port `8000` va healthcheck `/health`.
+* `requirements-api.txt`: dependency runtime nhe cho API container; Spark/Delta/MLflow va cac goi training nang van nam trong `requirements.txt` / `environment.yml`.
+* `.dockerignore`: loai bo `.git`, cache, virtualenv, MLflow artifacts va data output de image nhe hon.
+* `docker-compose.yml`: dung local stack gom `api`, `redis`, `qdrant`, `kafka` va persistent volumes.
+* `k8s/`: manifest Kustomize cho `smartshop-api`, `redis`, `qdrant`, `kafka`, `Service` va `HorizontalPodAutoscaler`.
+* `src/cache_service.py`, `src/vector_store.py`, `src/streaming.py`: ho tro doc cau hinh tu bien moi truong nhu `REDIS_HOST`, `QDRANT_HOST`, `KAFKA_BOOTSTRAP_SERVERS`.
+
+Chay local bang Docker Compose:
+
+```bash
+docker compose up --build -d
+docker compose ps
+curl http://localhost:8000/health
+```
+
+Tao JWT dev token roi goi API:
+
+```bash
+docker compose exec api python - <<'PY'
+from src.main import create_access_token
+print(create_access_token("admin-user"))
+PY
+
+curl -H "Authorization: Bearer <TOKEN>" \
+  "http://localhost:8000/search?query=noise%20cancelling%20headphones&top_k=5"
+```
+
+Build image va deploy len Kubernetes local:
+
+```bash
+docker build -t smartshop-api:latest .
+kubectl apply -k k8s/
+kubectl get pods,svc,hpa
+```
+
+Kiem thu Phase 9:
+
+```bash
+docker compose config
+python -m pytest tests/test_deployment_phase9.py
+```
+
+Luu y: API container trong `docker-compose.yml` duoc toi uu de boot nhanh cho backend runtime. Cac job ETL/training va indexing day du van nen chay bang Conda/venv theo `requirements.txt` hoac `environment.yml`, hoac tach thanh image worker rieng neu can production hoa pipeline du lieu.
+
 ---
 
 ### Phase 10: Monitoring & Observability
@@ -711,6 +937,55 @@ async def ask_agent(query: str):
 
 ---
 
+#### Ghi Chú Triển Khai Phase 10 Trong Repo
+
+Phần hiện thực nằm trong các file:
+
+* `src/monitoring.py`: `MonitoringService`, `LangfuseTracer`, `PrometheusConfig`, `LangfuseConfig`, context managers `track_search` / `track_llm_call`, module-level `@observe` decorator.
+* `src/main.py`: `create_app` tích hợp `MonitoringService.instrument(app)` để expose `/metrics`; `lifespan` gọi `monitoring.flush()` khi shutdown.
+* `requirements-api.txt`: thêm `prometheus-fastapi-instrumentator>=6.1.0`, `prometheus-client>=0.19.0`, `langfuse>=2.0.0`.
+* `docker-compose.yml`: thêm service `prometheus` (port `9090`) và `grafana` (port `3000`).
+* `monitoring/prometheus.yml`: cấu hình scrape `smartshop-api` tại `/metrics` mỗi 10 giây.
+* `monitoring/grafana/provisioning/datasources/prometheus.yml`: auto-provision Prometheus datasource.
+* `monitoring/grafana/provisioning/dashboards/smartshop_dashboard.json`: dashboard sẵn sàng với panels: Request Rate, Error Rate, P95 Latency, Search Cache Hit Rate, LLM Token Usage, LLM Latency.
+
+Dựng toàn bộ stack bao gồm Prometheus và Grafana:
+
+```bash
+docker compose up --build -d
+docker compose ps
+```
+
+Truy cập các endpoint:
+
+```
+http://localhost:8000/metrics     # Raw Prometheus metrics từ FastAPI
+http://localhost:9090             # Prometheus UI
+http://localhost:3000             # Grafana Dashboard (admin/admin)
+```
+
+Kích hoạt Langfuse tracing bằng cách đặt biến môi trường trong `.env`:
+
+```env
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_HOST=https://cloud.langfuse.com   # hoặc self-hosted
+```
+
+Kiểm tra trạng thái monitoring module:
+
+```bash
+python -m src.monitoring status
+```
+
+Kiểm thử Phase 10:
+
+```bash
+python -m pytest tests/test_monitoring_phase10.py -v
+```
+
+---
+
 ## 📈 Tóm Tắt Quy Trình Tổng Thể Lắp Ráp Cục Bộ (Local Deployment)
 
 Để chạy thử toàn bộ mô hình này trên máy của bạn (Local Development) mà không cần setup mây phức tạp:
@@ -728,3 +1003,4 @@ async def ask_agent(query: str):
 5.  **Theo dõi & Giám sát**:
     *   Truy cập `http://localhost:3000` để xem Dashboard Grafana.
     *   Đăng nhập vào Cloud Langfuse để giám sát chi phí token và chất lượng Agent.
+

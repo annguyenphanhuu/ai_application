@@ -72,3 +72,5 @@ venv.bak/
 *.tmp
 /data/
 /dbfs/
+/mlruns/
+/artifacts/
