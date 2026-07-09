@@ -25,9 +25,7 @@ default_args = {
 # Determine the execution environment (local, databricks, etc.)
 # Airflow Variable 'ENVIRONMENT' is used to toggle the execution mode.
 environment = Variable.get("ENVIRONMENT", default_var="local").lower()
-amazon_categories = Variable.get(
-    "SMARTSHOP_AMAZON_CATEGORIES", default_var="all"
-)
+amazon_categories = Variable.get("SMARTSHOP_AMAZON_CATEGORIES", default_var="all")
 
 with DAG(
     "smartshop_daily_etl",

@@ -28,9 +28,7 @@ def test_config_builds_hugging_face_config_names():
     )
     assert str(config.meta_output_path("All_Beauty")).endswith(
         "All_Beauty\\meta.jsonl"
-    ) or str(config.meta_output_path("All_Beauty")).endswith(
-        "All_Beauty/meta.jsonl"
-    )
+    ) or str(config.meta_output_path("All_Beauty")).endswith("All_Beauty/meta.jsonl")
     assert str(config.reviews_output_path("All_Beauty")).endswith(
         "All_Beauty\\reviews.jsonl"
     ) or str(config.reviews_output_path("All_Beauty")).endswith(
@@ -38,9 +36,7 @@ def test_config_builds_hugging_face_config_names():
     )
     assert str(config.combined_meta_output_path).endswith(
         "combined\\meta.jsonl"
-    ) or str(config.combined_meta_output_path).endswith(
-        "combined/meta.jsonl"
-    )
+    ) or str(config.combined_meta_output_path).endswith("combined/meta.jsonl")
 
 
 def test_parse_categories_accepts_comma_separated_values():

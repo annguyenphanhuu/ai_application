@@ -384,7 +384,9 @@ class ClickEventConsumer:
         try:
             producer.send(self.dead_letter_topic, value=dlq_event)
             producer.flush()
-            logger.warning("Sent message to DLQ (%s): %s", self.dead_letter_topic, reason)
+            logger.warning(
+                "Sent message to DLQ (%s): %s", self.dead_letter_topic, reason
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error("DLQ send failed: %s", exc)
 
@@ -413,7 +415,9 @@ class ClickEventConsumer:
                 logger.error("Malformed message, sending to DLQ: %s", exc)
                 self._send_to_dlq(raw, f"parse_error:{exc}")
             except Exception as exc:  # noqa: BLE001
-                logger.error("Unexpected error processing message, sending to DLQ: %s", exc)
+                logger.error(
+                    "Unexpected error processing message, sending to DLQ: %s", exc
+                )
                 self._send_to_dlq(raw, f"unexpected_error:{exc}")
 
 

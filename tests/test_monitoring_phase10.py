@@ -153,7 +153,10 @@ class TestMonitoringServiceMetrics:
         svc = self._make_service_with_mock_metrics()
         svc.record_llm_tokens(prompt_tokens=100, completion_tokens=50)
         calls = svc._metrics["llm_tokens_total"].labels.call_args_list
-        types_called = [c.kwargs.get("type") or c.args[0] if c.args else c.kwargs["type"] for c in calls]
+        types_called = [
+            c.kwargs.get("type") or c.args[0] if c.args else c.kwargs["type"]
+            for c in calls
+        ]
         assert "prompt" in str(types_called)
         assert "completion" in str(types_called)
 
@@ -170,7 +173,9 @@ class TestMonitoringServiceMetrics:
     def test_record_upload_success(self):
         svc = self._make_service_with_mock_metrics()
         svc.record_upload(success=True)
-        svc._metrics["catalog_uploads_total"].labels.assert_called_with(status="success")
+        svc._metrics["catalog_uploads_total"].labels.assert_called_with(
+            status="success"
+        )
 
     def test_record_upload_error(self):
         svc = self._make_service_with_mock_metrics()
@@ -286,7 +291,9 @@ class TestInstrumentApp:
         fake_module = types.ModuleType("prometheus_fastapi_instrumentator")
         fake_module.Instrumentator = MockClass
 
-        with patch.dict(sys.modules, {"prometheus_fastapi_instrumentator": fake_module}):
+        with patch.dict(
+            sys.modules, {"prometheus_fastapi_instrumentator": fake_module}
+        ):
             instrument_app(fake_app, PrometheusConfig())
 
         mock_inst.instrument.assert_called_once_with(fake_app)

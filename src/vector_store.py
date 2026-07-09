@@ -246,6 +246,7 @@ class QdrantVectorBackend:
                 self.client = client
             except Exception as exc:
                 import logging
+
                 logging.getLogger(__name__).warning(
                     f"Could not connect to Qdrant at {host}:{port} ({exc}). "
                     "Falling back to local in-memory Qdrant client (:memory:)."

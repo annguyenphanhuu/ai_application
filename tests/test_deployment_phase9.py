@@ -33,7 +33,10 @@ def test_docker_compose_wires_api_dependencies():
     assert "REDIS_HOST: redis" in compose
     assert "SMARTSHOP_ENV:" in compose
     assert "QDRANT_HOST: qdrant" in compose
-    assert "SMARTSHOP_EMBEDDING_BACKEND: ${SMARTSHOP_EMBEDDING_BACKEND:-hashing}" in compose
+    assert (
+        "SMARTSHOP_EMBEDDING_BACKEND: ${SMARTSHOP_EMBEDDING_BACKEND:-hashing}"
+        in compose
+    )
     assert "KAFKA_BOOTSTRAP_SERVERS: kafka:9092" in compose
     assert "redis:7-alpine" in compose
     assert "qdrant/qdrant" in compose
@@ -68,7 +71,10 @@ def test_compose_defines_optional_vector_indexer():
     assert "target: vector-indexer" in compose
     assert "python" in compose
     assert "src.vector_store" in compose
-    assert "${SMARTSHOP_VECTOR_INPUT_PATH:-/app/data/processed/products_processed}" in compose
+    assert (
+        "${SMARTSHOP_VECTOR_INPUT_PATH:-/app/data/processed/products_processed}"
+        in compose
+    )
     assert "./data/processed:/app/data/processed:ro" in compose
     assert "docker compose --profile indexer run --rm vector-indexer" in roadmap
     assert "redis-cli FLUSHDB" in roadmap

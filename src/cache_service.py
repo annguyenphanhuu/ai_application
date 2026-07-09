@@ -225,6 +225,7 @@ class MemoryRedisClient:
 
     def get(self, name: str) -> Any:
         import time
+
         if name in self._ttls and self._ttls[name] < time.time():
             self.delete(name)
             return None
@@ -232,6 +233,7 @@ class MemoryRedisClient:
 
     def setex(self, name: str, seconds: int, value: str) -> Any:
         import time
+
         self._data[name] = value
         self._ttls[name] = time.time() + seconds
         return True
@@ -288,6 +290,7 @@ class MemoryRedisClient:
 
     def expire(self, name: str, seconds: int) -> Any:
         import time
+
         self._ttls[name] = time.time() + seconds
         return True
 
@@ -302,6 +305,7 @@ class MemoryRedisClient:
 
     def ttl(self, name: str) -> int:
         import time
+
         if name not in self._ttls:
             return -1
         remaining = int(self._ttls[name] - time.time())
@@ -381,7 +385,10 @@ return {allowed, math.floor(tokens), reset_after}
 
         if config.host == ":memory:":
             import logging
-            logging.getLogger(__name__).warning("Using in-memory mock Redis client (:memory:).")
+
+            logging.getLogger(__name__).warning(
+                "Using in-memory mock Redis client (:memory:)."
+            )
             return MemoryRedisClient()
 
         client = redis.Redis(
@@ -397,6 +404,7 @@ return {allowed, math.floor(tokens), reset_after}
             return client
         except Exception as exc:
             import logging
+
             logging.getLogger(__name__).warning(
                 f"Could not connect to Redis at {config.host}:{config.port} ({exc}). "
                 "Falling back to in-memory mock Redis client."

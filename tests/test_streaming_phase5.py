@@ -193,7 +193,9 @@ def test_producer_forwards_to_dlq_after_all_retries_exhausted():
         retry_backoff_ms=0,
     )
     # _send_with_retry returns False when all attempts fail
-    success = service._send_with_retry("user-clicks", {"user_id": "U01", "product_id": "P01"})
+    success = service._send_with_retry(
+        "user-clicks", {"user_id": "U01", "product_id": "P01"}
+    )
     assert success is False
     assert fake._call_count == 2  # exactly max_retries attempts
 
@@ -229,6 +231,7 @@ def test_consumer_sends_malformed_message_to_dlq():
     class FakeDlqProducer:
         def send(self, topic, value):
             dlq_events.append((topic, value))
+
         def flush(self):
             pass
 
@@ -276,10 +279,19 @@ def test_redis_store_top_products_sorted():
 
 
 def test_build_parser_produce():
-    args = build_parser().parse_args([
-        "produce", "--user-id", "U01", "--product-id", "P01",
-        "--topic", "user-clicks", "--dead-letter-topic", "user-clicks-dlq",
-    ])
+    args = build_parser().parse_args(
+        [
+            "produce",
+            "--user-id",
+            "U01",
+            "--product-id",
+            "P01",
+            "--topic",
+            "user-clicks",
+            "--dead-letter-topic",
+            "user-clicks-dlq",
+        ]
+    )
     assert args.command == "produce"
     assert args.user_id == "U01"
     assert args.dead_letter_topic == "user-clicks-dlq"
