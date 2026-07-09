@@ -30,3 +30,5 @@ scikit-learn>=1.2.0
 pandas>=2.0.0
 numpy>=1.23.0
 pyarrow>=14.0.0
+huggingface-hub>=0.24.0
+requests>=2.32.0

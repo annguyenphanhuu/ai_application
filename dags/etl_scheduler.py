@@ -25,6 +25,9 @@ default_args = {
 # Determine the execution environment (local, databricks, etc.)
 # Airflow Variable 'ENVIRONMENT' is used to toggle the execution mode.
 environment = Variable.get("ENVIRONMENT", default_var="local").lower()
+amazon_categories = Variable.get(
+    "SMARTSHOP_AMAZON_CATEGORIES", default_var="all"
+)
 
 with DAG(
     "smartshop_daily_etl",
@@ -43,6 +46,19 @@ with DAG(
         script_path = Variable.get(
             "DATABRICKS_SCRIPT_PATH", default_var="dbfs:/scripts/spark_etl.py"
         )
+        products_input = Variable.get(
+            "SMARTSHOP_PRODUCTS_INPUT",
+            default_var="dbfs:/mnt/raw-data/amazon_reviews_2023/combined/meta.jsonl",
+        )
+        reviews_input = Variable.get(
+            "SMARTSHOP_REVIEWS_INPUT",
+            default_var="dbfs:/mnt/raw-data/amazon_reviews_2023/combined/reviews.jsonl",
+        )
+        products_output = Variable.get(
+            "SMARTSHOP_PRODUCTS_OUTPUT",
+            default_var="dbfs:/mnt/processed-data/products_processed",
+        )
+        output_format = Variable.get("SMARTSHOP_OUTPUT_FORMAT", default_var="delta")
 
         # Trigger Spark job on Databricks Cluster
         run_spark_etl = DatabricksSubmitRunOperator(
@@ -52,13 +68,13 @@ with DAG(
                 "python_file": script_path,
                 "parameters": [
                     "--input-products",
-                    "dbfs:/mnt/raw-data/amazon_products.jsonl",
+                    products_input,
                     "--input-reviews",
-                    "dbfs:/mnt/raw-data/amazon_reviews.jsonl",
+                    reviews_input,
                     "--output-path",
-                    "dbfs:/mnt/processed-data/products_delta",
+                    products_output,
                     "--output-format",
-                    "delta",
+                    output_format,
                 ],
             },
         )
@@ -69,17 +85,47 @@ with DAG(
             "WORKSPACE_PATH",
             default_var=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         )
+        products_input = Variable.get(
+            "SMARTSHOP_PRODUCTS_INPUT",
+            default_var=(
+                f"{workspace_path}/data/raw/amazon_reviews_2023/combined/meta.jsonl"
+            ),
+        )
+        reviews_input = Variable.get(
+            "SMARTSHOP_REVIEWS_INPUT",
+            default_var=(
+                f"{workspace_path}/data/raw/amazon_reviews_2023/combined/reviews.jsonl"
+            ),
+        )
+        products_output = Variable.get(
+            "SMARTSHOP_PRODUCTS_OUTPUT",
+            default_var=f"{workspace_path}/data/processed/products_processed",
+        )
+        output_format = Variable.get("SMARTSHOP_OUTPUT_FORMAT", default_var="parquet")
+        max_products = Variable.get("SMARTSHOP_MAX_PRODUCTS", default_var="5000")
+        max_reviews = Variable.get("SMARTSHOP_MAX_REVIEWS", default_var="20000")
+
+        materialize_amazon_reviews = BashOperator(
+            task_id="materialize_amazon_reviews_2023_local",
+            bash_command=(
+                f"python {workspace_path}/jobs/amazon_reviews_2023.py "
+                f"--categories {amazon_categories} "
+                f"--output-dir {workspace_path}/data/raw/amazon_reviews_2023 "
+                f"--max-products {max_products} "
+                f"--max-reviews {max_reviews}"
+            ),
+        )
 
         run_spark_etl = BashOperator(
             task_id="run_spark_etl_job_local",
             bash_command=(
                 f"python {workspace_path}/jobs/spark_etl.py "
-                f"--input-products {workspace_path}/data/raw/amazon_products.jsonl "
-                f"--input-reviews {workspace_path}/data/raw/amazon_reviews.jsonl "
-                f"--output-path {workspace_path}/data/processed/products_processed "
-                f"--output-format parquet "
+                f"--input-products {products_input} "
+                f"--input-reviews {reviews_input} "
+                f"--output-path {products_output} "
+                f"--output-format {output_format} "
                 f"--master 'local[*]'"
             ),
         )
 
-    run_spark_etl
+        materialize_amazon_reviews >> run_spark_etl

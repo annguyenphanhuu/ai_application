@@ -29,3 +29,5 @@ dependencies:
       - langchain-core>=0.2.0
       - langchain-openai>=0.1.0
       - langgraph>=0.0.10
+      - huggingface-hub>=0.24.0
+      - requests>=2.32.0

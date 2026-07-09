@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import Sequence
 
 
-DEFAULT_PRODUCTS_INPUT = "data/raw/amazon_products.jsonl"
-DEFAULT_PRODUCTS_OUTPUT = "data/processed/products_delta"
+DEFAULT_PRODUCTS_INPUT = "data/raw/amazon_reviews_2023/combined/meta.jsonl"
+DEFAULT_REVIEWS_INPUT = "data/raw/amazon_reviews_2023/combined/reviews.jsonl"
+DEFAULT_PRODUCTS_OUTPUT = "data/processed/products_processed"
 SUPPORTED_FORMATS = {"csv", "delta", "json", "jsonl", "parquet"}
 REMOTE_PATH_MARKERS = ("://", "dbfs:/")
 
@@ -25,7 +26,7 @@ class EtlConfig:
     products_input: str
     products_output: str
     reviews_input: str | None = None
-    output_format: str = "delta"
+    output_format: str = "parquet"
     master: str | None = None
     app_name: str = "SmartShop-Product-ETL"
     write_mode: str = "overwrite"
@@ -96,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--input-reviews",
-        default=env_default("SMARTSHOP_REVIEWS_INPUT"),
+        default=env_default("SMARTSHOP_REVIEWS_INPUT", DEFAULT_REVIEWS_INPUT),
         help="Optional review data path used to aggregate avg_rating/review_count.",
     )
     parser.add_argument(
@@ -108,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-format",
-        default=env_default("SMARTSHOP_OUTPUT_FORMAT", "delta"),
+        default=env_default("SMARTSHOP_OUTPUT_FORMAT", "parquet"),
         choices=sorted(SUPPORTED_FORMATS - {"jsonl"}),
         help="Storage format for processed data.",
     )
@@ -176,7 +177,67 @@ def read_dataset(spark, path: str):
         return reader.parquet(path)
     if data_format == "delta":
         return reader.format("delta").load(path)
-    return reader.option("multiLine", False).json(path)
+    try:
+        return reader.option("multiLine", False).json(path)
+    except Exception as exc:
+        if "COLUMN_ALREADY_EXISTS" not in str(exc):
+            raise
+        return read_projected_json_dataset(spark, path)
+
+
+def raw_amazon_reviews_2023_schema():
+    from pyspark.sql.types import (
+        ArrayType,
+        BooleanType,
+        DoubleType,
+        LongType,
+        StringType,
+        StructField,
+        StructType,
+    )
+
+    return StructType(
+        [
+            StructField("parent_asin", StringType(), True),
+            StructField("asin", StringType(), True),
+            StructField("product_id", StringType(), True),
+            StructField("id", StringType(), True),
+            StructField("title", StringType(), True),
+            StructField("name", StringType(), True),
+            StructField("main_category", StringType(), True),
+            StructField("category", StringType(), True),
+            StructField("categories", ArrayType(StringType()), True),
+            StructField("main_cat", StringType(), True),
+            StructField("description", ArrayType(StringType()), True),
+            StructField("features", ArrayType(StringType()), True),
+            StructField("feature", ArrayType(StringType()), True),
+            StructField("store", StringType(), True),
+            StructField("brand", StringType(), True),
+            StructField("manufacturer", StringType(), True),
+            StructField("price", StringType(), True),
+            StructField("list_price", StringType(), True),
+            StructField("avg_rating", DoubleType(), True),
+            StructField("average_rating", DoubleType(), True),
+            StructField("rating", DoubleType(), True),
+            StructField("overall", DoubleType(), True),
+            StructField("stars", DoubleType(), True),
+            StructField("rating_number", LongType(), True),
+            StructField("text", StringType(), True),
+            StructField("timestamp", LongType(), True),
+            StructField("verified_purchase", BooleanType(), True),
+        ]
+    )
+
+
+def read_projected_json_dataset(spark, path: str):
+    from pyspark.sql.functions import col, from_json
+
+    schema = raw_amazon_reviews_2023_schema()
+    return (
+        spark.read.text(path)
+        .select(from_json(col("value"), schema).alias("record"))
+        .select("record.*")
+    )
 
 
 def first_existing(columns: Sequence[str], candidates: Sequence[str]) -> str | None:
@@ -192,6 +253,18 @@ def column_or_default(df, candidates: Sequence[str], default_value=None):
 
     column_name = first_existing(df.columns, candidates)
     return col(column_name) if column_name else lit(default_value)
+
+
+def coalesced_column_or_default(df, candidates: Sequence[str], default_value=None):
+    from pyspark.sql.functions import coalesce, col, lit
+
+    available = {column.lower(): column for column in df.columns}
+    columns = [
+        col(available[candidate.lower()])
+        for candidate in candidates
+        if candidate.lower() in available
+    ]
+    return coalesce(*columns) if columns else lit(default_value)
 
 
 def clean_text(column_expression, fallback: str):
@@ -222,11 +295,13 @@ def normalize_products(products_df):
     )
     category_column = column_or_default(
         products_df,
-        ("category", "categories", "main_cat"),
+        ("main_category", "category", "categories", "main_cat"),
         "Uncategorized",
     )
-    price_column = column_or_default(products_df, ("price", "list_price"), None)
-    rating_column = column_or_default(
+    price_column = coalesced_column_or_default(
+        products_df, ("price", "list_price"), None
+    )
+    rating_column = coalesced_column_or_default(
         products_df,
         ("avg_rating", "average_rating", "rating", "overall"),
         None,
@@ -234,7 +309,8 @@ def normalize_products(products_df):
 
     normalized = products_df.select(
         clean_text(
-            column_or_default(products_df, ("asin", "product_id", "id")), ""
+            column_or_default(products_df, ("parent_asin", "asin", "product_id", "id")),
+            "",
         ).alias("product_id"),
         clean_text(
             column_or_default(products_df, ("title", "name"), "Unknown"), "Unknown"
@@ -243,7 +319,9 @@ def normalize_products(products_df):
             "description"
         ),
         clean_text(
-            column_or_default(products_df, ("brand", "manufacturer"), "Unknown"),
+            column_or_default(
+                products_df, ("store", "brand", "manufacturer"), "Unknown"
+            ),
             "Unknown",
         ).alias("brand"),
         clean_text(concat_ws(" > ", category_column), "Uncategorized").alias(
@@ -268,7 +346,9 @@ def normalize_products(products_df):
 def aggregate_reviews(reviews_df):
     from pyspark.sql.functions import avg, col, count
 
-    product_id_column = column_or_default(reviews_df, ("asin", "product_id"))
+    product_id_column = column_or_default(
+        reviews_df, ("parent_asin", "asin", "product_id")
+    )
     rating_column = column_or_default(reviews_df, ("overall", "rating", "stars"))
 
     return (

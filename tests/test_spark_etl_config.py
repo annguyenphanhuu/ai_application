@@ -3,6 +3,7 @@ import pytest
 from jobs.spark_etl import (
     DEFAULT_PRODUCTS_INPUT,
     DEFAULT_PRODUCTS_OUTPUT,
+    DEFAULT_REVIEWS_INPUT,
     EtlConfig,
     infer_format,
     parse_args,
@@ -16,8 +17,8 @@ def test_parse_args_uses_defaults():
     assert config == EtlConfig(
         products_input=DEFAULT_PRODUCTS_INPUT,
         products_output=DEFAULT_PRODUCTS_OUTPUT,
-        reviews_input=None,
-        output_format="delta",
+        reviews_input=DEFAULT_REVIEWS_INPUT,
+        output_format="parquet",
         master=None,
         write_mode="overwrite",
     )
