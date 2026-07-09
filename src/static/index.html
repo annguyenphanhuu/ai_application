@@ -4,25 +4,61 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>SmartShop AI Console</title>
+    <!-- Modern Typography from Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    
     <style>
       :root {
-        color-scheme: light;
-        --bg: #f7f6f2;
-        --panel: #ffffff;
-        --panel-subtle: #faf9f6;
-        --ink: #171a17;
-        --muted: #6d746e;
-        --faint: #929991;
-        --line: #e5e2da;
-        --line-strong: #d4d0c6;
-        --primary: #0d6b55;
-        --primary-hover: #095844;
-        --primary-soft: #e8f4ef;
-        --success: #138354;
-        --danger: #b83b35;
-        --warning: #9b6b1d;
-        --radius: 8px;
-        --shadow: 0 24px 70px rgba(23, 26, 23, 0.08);
+        /* Color Palette - Modern Obsidian Theme */
+        --bg-primary: #06070a;
+        --bg-secondary: #0b0c10;
+        --bg-tertiary: #11131a;
+        --panel-bg: rgba(11, 12, 16, 0.7);
+        --panel-bg-subtle: rgba(17, 19, 26, 0.45);
+        
+        --border-color: rgba(255, 255, 255, 0.08);
+        --border-hover: rgba(255, 255, 255, 0.16);
+        --border-focus: rgba(16, 185, 129, 0.4);
+        
+        --text-primary: #f3f4f6;
+        --text-secondary: #9ca3af;
+        --text-muted: #6b7280;
+        
+        /* Accents */
+        --primary: #10b981;          /* Emerald / Mint */
+        --primary-hover: #34d399;
+        --primary-glow: rgba(16, 185, 129, 0.15);
+        --primary-soft: rgba(16, 185, 129, 0.1);
+        
+        --accent: #6366f1;           /* Indigo */
+        --accent-hover: #818cf8;
+        --accent-glow: rgba(99, 102, 241, 0.15);
+        --accent-soft: rgba(99, 102, 241, 0.1);
+        
+        /* Semantics */
+        --success: #10b981;
+        --danger: #ef4444;
+        --warning: #f59e0b;
+        --info: #3b82f6;
+        
+        --radius-sm: 6px;
+        --radius-md: 10px;
+        --radius-lg: 16px;
+        
+        --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --font-heading: 'Outfit', system-ui, sans-serif;
+        --font-mono: 'JetBrains Mono', monospace;
+        
+        --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4);
+        --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.5);
+        --shadow-lg: 0 20px 50px rgba(0, 0, 0, 0.7);
+        
+        --transition-fast: 120ms ease;
+        --transition-normal: 220ms cubic-bezier(0.16, 1, 0.3, 1);
+        
+        --sidebar-width: 280px;
       }
 
       * {
@@ -36,115 +72,149 @@
       body {
         margin: 0;
         min-height: 100vh;
-        background:
-          linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(247, 246, 242, 0) 360px),
-          var(--bg);
-        color: var(--ink);
-        font-family:
-          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-          sans-serif;
-        letter-spacing: 0;
+        background-color: var(--bg-primary);
+        /* Subtle glowing mesh gradients and grid overlay */
+        background-image: 
+          radial-gradient(circle at 10% 10%, rgba(99, 102, 241, 0.05) 0%, transparent 40%),
+          radial-gradient(circle at 90% 90%, rgba(16, 185, 129, 0.05) 0%, transparent 40%),
+          linear-gradient(rgba(255, 255, 255, 0.003) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.003) 1px, transparent 1px);
+        background-size: 100% 100%, 100% 100%, 28px 28px, 28px 28px;
+        color: var(--text-primary);
+        font-family: var(--font-sans);
+        letter-spacing: -0.011em;
+        line-height: 1.5;
+        overflow-x: hidden;
       }
 
+      /* Scrollbar Styling */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: var(--radius-sm);
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.2);
+      }
+
+      /* Buttons & Inputs */
       button,
       input,
+      select,
       textarea {
         font: inherit;
+        color: inherit;
       }
 
       button {
         align-items: center;
-        border: 0;
-        border-radius: var(--radius);
+        border: 1px solid transparent;
+        border-radius: var(--radius-md);
         cursor: pointer;
         display: inline-flex;
-        font-weight: 650;
+        font-weight: 600;
+        font-size: 14px;
         gap: 8px;
         justify-content: center;
-        min-height: 40px;
-        padding: 0 14px;
-        transition:
-          background-color 140ms ease,
-          border-color 140ms ease,
-          color 140ms ease,
-          transform 140ms ease;
+        min-height: 42px;
+        padding: 0 16px;
+        transition: all var(--transition-normal);
+        position: relative;
+        overflow: hidden;
       }
 
       button.primary {
         background: var(--primary);
-        color: #ffffff;
+        color: #06070a;
+        box-shadow: 0 4px 12px var(--primary-glow);
       }
 
       button.primary:hover {
         background: var(--primary-hover);
-        transform: translateY(-1px);
+        transform: translateY(-1.5px);
+        box-shadow: 0 6px 18px rgba(16, 185, 129, 0.3);
+      }
+
+      button.primary:active {
+        transform: translateY(0);
       }
 
       button.secondary {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        color: var(--ink);
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border-color);
+        color: var(--text-primary);
       }
 
       button.secondary:hover {
-        background: #f4f2ec;
-        border-color: var(--line-strong);
+        background: var(--panel-bg-subtle);
+        border-color: var(--border-hover);
+        transform: translateY(-1.5px);
+      }
+
+      button.secondary:active {
+        transform: translateY(0);
       }
 
       button.ghost {
         background: transparent;
-        color: var(--muted);
+        color: var(--text-secondary);
       }
 
       button.ghost:hover {
-        background: #efede7;
-        color: var(--ink);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text-primary);
       }
 
       button:disabled {
         cursor: not-allowed;
-        opacity: 0.55;
-        transform: none;
+        opacity: 0.45 !important;
+        transform: none !important;
+        box-shadow: none !important;
       }
 
       input,
       textarea {
         width: 100%;
-        border: 1px solid var(--line);
-        border-radius: var(--radius);
-        background: #ffffff;
-        color: var(--ink);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-md);
+        background: rgba(11, 12, 16, 0.5);
+        color: var(--text-primary);
         outline: none;
-        padding: 10px 12px;
-        transition:
-          border-color 140ms ease,
-          box-shadow 140ms ease,
-          background-color 140ms ease;
+        padding: 10px 14px;
+        transition: all var(--transition-normal);
+        font-size: 14px;
       }
 
       input {
-        min-height: 40px;
+        min-height: 42px;
       }
 
       textarea {
-        min-height: 116px;
+        min-height: 110px;
         resize: vertical;
       }
 
       input:focus,
-      textarea:focus,
-      button:focus-visible {
-        border-color: rgba(13, 107, 85, 0.72);
-        box-shadow: 0 0 0 4px rgba(13, 107, 85, 0.13);
+      textarea:focus {
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px var(--primary-glow);
+        background: rgba(11, 12, 16, 0.8);
       }
 
       label {
-        color: var(--muted);
+        color: var(--text-secondary);
         display: grid;
         font-size: 12px;
-        font-weight: 700;
-        gap: 8px;
-        letter-spacing: 0.02em;
+        font-weight: 600;
+        gap: 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
       }
 
       pre {
@@ -153,52 +223,65 @@
         white-space: pre-wrap;
       }
 
+      /* Main Page Structure */
       .app {
         display: grid;
-        grid-template-columns: 248px minmax(0, 1fr);
+        grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
         min-height: 100vh;
       }
 
+      /* Sidebar Component */
       .sidebar {
-        border-right: 1px solid var(--line);
+        background: var(--bg-secondary);
+        border-right: 1px solid var(--border-color);
         display: flex;
         flex-direction: column;
-        gap: 24px;
+        gap: 28px;
         min-height: 100vh;
-        padding: 24px;
+        padding: 32px 24px;
         position: sticky;
         top: 0;
+        z-index: 10;
       }
 
       .logo {
-        display: grid;
-        gap: 8px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
       }
 
-      .logo-mark {
+      .logo-icon-wrapper {
+        display: flex;
         align-items: center;
-        background: var(--ink);
-        border-radius: 8px;
-        color: #ffffff;
-        display: inline-flex;
-        font-size: 13px;
-        font-weight: 800;
-        height: 32px;
         justify-content: center;
-        width: 32px;
+        width: 36px;
+        height: 36px;
+        background: linear-gradient(135deg, var(--primary), var(--accent));
+        border-radius: var(--radius-md);
+        box-shadow: 0 4px 10px rgba(16, 185, 129, 0.2);
+        color: #06070a;
+        font-family: var(--font-heading);
+        font-weight: 800;
+        font-size: 16px;
       }
 
       .logo h1 {
-        font-size: 18px;
-        line-height: 1.15;
+        font-family: var(--font-heading);
+        font-size: 19px;
+        font-weight: 700;
         margin: 0;
+        background: linear-gradient(to right, var(--text-primary), var(--text-secondary));
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
       }
 
       .logo p {
-        color: var(--muted);
-        font-size: 13px;
-        line-height: 1.45;
-        margin: 0;
+        color: var(--text-muted);
+        font-size: 11px;
+        margin: 2px 0 0 0;
+        font-weight: 400;
+        line-height: 1.4;
+        text-transform: none;
       }
 
       .nav {
@@ -208,212 +291,386 @@
 
       .nav a {
         align-items: center;
-        border-radius: var(--radius);
-        color: var(--muted);
+        border-radius: var(--radius-md);
+        color: var(--text-secondary);
         display: flex;
         font-size: 14px;
-        font-weight: 650;
-        min-height: 38px;
-        padding: 0 10px;
+        font-weight: 550;
+        gap: 12px;
+        min-height: 42px;
+        padding: 0 14px;
         text-decoration: none;
+        transition: all var(--transition-fast);
       }
 
-      .nav a:first-child,
+      .nav a svg {
+        transition: color var(--transition-fast);
+        opacity: 0.85;
+      }
+
       .nav a:hover {
-        background: #efede7;
-        color: var(--ink);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text-primary);
+      }
+
+      /* Active tab styling based on simple active match or anchor clicks */
+      .nav a.active,
+      .nav a:focus-visible {
+        background: var(--primary-soft);
+        color: var(--primary);
+        border-left: 3px solid var(--primary);
+        border-top-left-radius: 2px;
+        border-bottom-left-radius: 2px;
+        padding-left: 11px;
+      }
+      
+      .nav a.active svg {
+        color: var(--primary);
       }
 
       .sidebar-footer {
-        border-top: 1px solid var(--line);
+        border-top: 1px solid var(--border-color);
         display: grid;
-        gap: 12px;
+        gap: 14px;
         margin-top: auto;
-        padding-top: 18px;
+        padding-top: 24px;
       }
 
       .status-pill {
         align-items: center;
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 999px;
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border-color);
+        border-radius: 99px;
         display: inline-flex;
         font-size: 13px;
-        font-weight: 700;
-        gap: 8px;
-        min-height: 36px;
-        padding: 0 12px;
+        font-weight: 600;
+        gap: 10px;
+        min-height: 38px;
+        padding: 0 14px;
         width: fit-content;
       }
 
       .dot {
-        background: var(--faint);
-        border-radius: 999px;
+        background: var(--text-muted);
+        border-radius: 99px;
         height: 8px;
         width: 8px;
+        position: relative;
+        display: inline-block;
       }
 
       .dot.ok {
         background: var(--success);
+        box-shadow: 0 0 10px var(--success);
+      }
+      
+      .dot.ok::after {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; right: 0; bottom: 0;
+        border-radius: 50%;
+        border: 1px solid var(--success);
+        animation: pulse-ring 1.8s infinite;
       }
 
       .dot.bad {
         background: var(--danger);
+        box-shadow: 0 0 10px var(--danger);
+      }
+      
+      .dot.bad::after {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; right: 0; bottom: 0;
+        border-radius: 50%;
+        border: 1px solid var(--danger);
+        animation: pulse-ring 1.8s infinite;
       }
 
+      @keyframes pulse-ring {
+        0% { transform: scale(1); opacity: 1; }
+        100% { transform: scale(2.6); opacity: 0; }
+      }
+
+      /* Main Content Area */
       .main {
         min-width: 0;
-        padding: 24px;
+        padding: 32px 40px;
+        overflow-y: auto;
       }
 
       .masthead {
-        align-items: end;
         display: flex;
-        gap: 24px;
+        align-items: flex-start;
+        gap: 32px;
         justify-content: space-between;
-        margin: 0 auto 20px;
-        max-width: 1240px;
+        margin: 0 auto 32px;
+        max-width: 1280px;
+        border-bottom: 1px solid var(--border-color);
+        padding-bottom: 24px;
       }
 
       .eyebrow {
         color: var(--primary);
-        font-size: 12px;
-        font-weight: 800;
-        letter-spacing: 0.08em;
-        margin: 0 0 10px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        margin: 0 0 8px;
         text-transform: uppercase;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      
+      .eyebrow-dot {
+        width: 6px;
+        height: 6px;
+        background: var(--primary);
+        border-radius: 50%;
+        display: inline-block;
+        box-shadow: 0 0 8px var(--primary);
       }
 
       .masthead h2 {
-        font-size: clamp(30px, 4vw, 48px);
-        line-height: 1;
+        font-family: var(--font-heading);
+        font-size: clamp(26px, 3.5vw, 36px);
+        font-weight: 800;
+        line-height: 1.15;
         margin: 0;
         max-width: 720px;
+        background: linear-gradient(to bottom right, #ffffff, #9ca3af);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
       }
 
       .masthead p {
-        color: var(--muted);
-        font-size: 15px;
+        color: var(--text-secondary);
+        font-size: 14px;
         line-height: 1.6;
-        margin: 12px 0 0;
+        margin: 10px 0 0;
         max-width: 680px;
       }
 
+      /* Bearer Token Panel */
       .token-bar {
-        background: rgba(255, 255, 255, 0.72);
-        border: 1px solid var(--line);
-        border-radius: var(--radius);
-        display: grid;
-        gap: 10px;
-        min-width: 360px;
-        padding: 12px;
+        background: var(--panel-bg);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-lg);
+        min-width: 380px;
+        padding: 16px;
+        box-shadow: var(--shadow-sm);
+        backdrop-filter: blur(12px);
+      }
+      
+      .token-bar label {
+        font-size: 11px;
+        margin-bottom: 8px;
       }
 
       .token-actions {
-        display: grid;
+        display: flex;
         gap: 8px;
-        grid-template-columns: 1fr auto auto;
       }
 
+      .token-input-wrapper {
+        position: relative;
+        flex: 1;
+        display: flex;
+        align-items: center;
+      }
+
+      .token-input-wrapper svg {
+        position: absolute;
+        left: 12px;
+        color: var(--text-muted);
+        pointer-events: none;
+      }
+
+      .token-input-wrapper input {
+        padding-left: 36px;
+        min-height: 38px;
+        font-size: 13px;
+      }
+
+      .token-actions button {
+        min-height: 38px;
+        padding: 0 14px;
+        font-size: 13px;
+      }
+
+      /* Workspace Layout */
       .workspace {
-        display: grid;
-        gap: 18px;
-        grid-template-columns: minmax(0, 1.35fr) minmax(340px, 0.65fr);
         margin: 0 auto;
-        max-width: 1240px;
+        max-width: 1280px;
+        position: relative;
       }
 
+      /* Glassmorphic Surfaces */
       .surface {
-        background: rgba(255, 255, 255, 0.88);
-        border: 1px solid var(--line);
-        border-radius: var(--radius);
-        box-shadow: var(--shadow);
+        background: var(--panel-bg);
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-lg);
+        box-shadow: var(--shadow-md);
+        backdrop-filter: blur(16px);
+        overflow: hidden;
       }
 
-      .chat-panel {
-        display: grid;
-        grid-template-rows: auto minmax(300px, 1fr) auto;
+      /* Chat Panel (Shopping Assistant) & Tool Panels */
+      .chat-panel,
+      .surface.tool {
         min-height: 720px;
+        height: 75vh;
+        display: flex;
+        flex-direction: column;
       }
 
       .panel-head {
         align-items: center;
-        border-bottom: 1px solid var(--line);
+        border-bottom: 1px solid var(--border-color);
         display: flex;
         gap: 16px;
         justify-content: space-between;
-        padding: 18px;
-      }
-
-      .panel-title {
-        min-width: 0;
+        padding: 20px 24px;
+        background: var(--panel-bg-subtle);
       }
 
       .panel-title h3 {
-        font-size: 17px;
-        line-height: 1.2;
+        font-family: var(--font-heading);
+        font-size: 18px;
+        font-weight: 600;
         margin: 0;
       }
 
       .panel-title p {
-        color: var(--muted);
+        color: var(--text-secondary);
         font-size: 13px;
-        line-height: 1.45;
-        margin: 5px 0 0;
+        margin: 4px 0 0;
+        line-height: 1.4;
       }
 
       .session-chip {
-        background: var(--panel-subtle);
-        border: 1px solid var(--line);
-        border-radius: 999px;
-        color: var(--muted);
-        font-family:
-          "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-        font-size: 12px;
-        padding: 8px 10px;
+        background: var(--accent-soft);
+        border: 1px solid rgba(99, 102, 241, 0.2);
+        border-radius: 99px;
+        color: var(--accent-hover);
+        font-family: var(--font-mono);
+        font-size: 11px;
+        padding: 6px 12px;
         white-space: nowrap;
+        font-weight: 500;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
       }
 
+      /* Chat Log & Message Bubbles */
       .chat-log {
-        align-content: start;
-        display: grid;
-        gap: 12px;
-        overflow: auto;
-        padding: 18px;
+        flex: 1;
+        overflow-y: auto;
+        padding: 24px;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        background: rgba(6, 7, 10, 0.2);
       }
 
       .message {
-        border: 1px solid var(--line);
-        border-radius: var(--radius);
-        display: grid;
-        gap: 7px;
+        border-radius: var(--radius-lg);
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
         line-height: 1.55;
-        max-width: 82%;
-        padding: 12px 14px;
+        max-width: 85%;
+        padding: 14px 18px;
+        font-size: 14.5px;
+        animation: bubble-fade 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+      }
+
+      @keyframes bubble-fade {
+        from {
+          opacity: 0;
+          transform: translateY(8px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
       }
 
       .message strong {
-        font-size: 12px;
-        letter-spacing: 0.02em;
+        font-size: 11px;
+        letter-spacing: 0.05em;
         text-transform: uppercase;
+        color: var(--text-muted);
+        display: flex;
+        align-items: center;
+        gap: 6px;
       }
 
       .message.assistant {
-        background: var(--panel-subtle);
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border-color);
+        border-left: 3px solid var(--primary);
+        align-self: flex-start;
+        border-top-left-radius: 2px;
+      }
+      
+      .message.assistant strong {
+        color: var(--primary-hover);
       }
 
       .message.user {
-        background: var(--primary);
-        border-color: var(--primary);
-        color: #ffffff;
-        justify-self: end;
+        background: linear-gradient(135deg, var(--accent-soft), rgba(99, 102, 241, 0.03));
+        border: 1px solid rgba(99, 102, 241, 0.25);
+        align-self: flex-end;
+        border-top-right-radius: 2px;
+      }
+      
+      .message.user strong {
+        color: var(--accent-hover);
+      }
+      
+      .message span {
+        white-space: pre-wrap;
       }
 
+      /* Empty State styling */
+      .empty, .chat-welcome {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        color: var(--text-secondary);
+        padding: 40px 24px;
+        margin: auto;
+        max-width: 440px;
+      }
+      
+      .chat-welcome svg {
+        margin-bottom: 18px;
+        opacity: 0.85;
+      }
+      
+      .chat-welcome h3 {
+        font-family: var(--font-heading);
+        font-size: 18px;
+        color: var(--text-primary);
+        margin: 0 0 10px 0;
+      }
+      
+      .chat-welcome p {
+        font-size: 13px;
+        line-height: 1.5;
+        margin: 0;
+      }
+
+      /* Composer Input Form */
       .composer {
-        border-top: 1px solid var(--line);
-        display: grid;
-        gap: 12px;
-        padding: 18px;
+        border-top: 1px solid var(--border-color);
+        padding: 20px 24px;
+        background: var(--panel-bg-subtle);
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
       }
 
       .prompt-row {
@@ -423,182 +680,412 @@
       }
 
       .prompt-row button {
-        min-height: 34px;
+        min-height: 32px;
+        padding: 0 12px;
+        font-size: 12px;
+        border: 1px solid var(--border-color);
+        background: rgba(255, 255, 255, 0.02);
+        border-radius: var(--radius-sm);
+        color: var(--text-secondary);
       }
 
-      .composer-actions {
-        align-items: center;
+      .prompt-row button:hover {
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text-primary);
+        border-color: var(--border-hover);
+      }
+
+      .composer-input-area {
+        position: relative;
         display: flex;
-        gap: 10px;
+        flex-direction: column;
+      }
+
+      .composer-input-area textarea {
+        padding-bottom: 50px;
+        resize: none;
+      }
+
+      .composer-actions-inside {
+        position: absolute;
+        bottom: 8px;
+        right: 8px;
+        left: 8px;
+        display: flex;
         justify-content: space-between;
+        align-items: center;
+        pointer-events: none;
+      }
+
+      .composer-actions-inside * {
+        pointer-events: auto;
       }
 
       .hint {
-        color: var(--muted);
+        color: var(--text-muted);
+        font-size: 12px;
+        font-style: italic;
+        padding-left: 8px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .composer-btn-group {
+        display: flex;
+        gap: 8px;
+      }
+
+      .composer-btn-group button {
+        min-height: 36px;
+        padding: 0 12px;
         font-size: 13px;
       }
 
+      /* Right Rail Tools Container */
       .rail {
         display: grid;
-        gap: 18px;
-      }
-
-      .tool {
-        display: grid;
+        gap: 0;
       }
 
       .tool-head {
-        align-items: start;
-        border-bottom: 1px solid var(--line);
+        border-bottom: 1px solid var(--border-color);
+        padding: 20px 24px;
         display: flex;
-        gap: 12px;
+        align-items: center;
         justify-content: space-between;
-        padding: 16px;
+        background: var(--panel-bg-subtle);
       }
 
       .tool-head h3 {
-        font-size: 16px;
+        font-family: var(--font-heading);
+        font-size: 18px;
+        font-weight: 600;
         margin: 0;
+        display: flex;
+        align-items: center;
+        gap: 10px;
       }
 
       .tool-head p {
-        color: var(--muted);
+        color: var(--text-secondary);
         font-size: 13px;
-        line-height: 1.45;
-        margin: 5px 0 0;
+        margin: 4px 0 0;
+        line-height: 1.4;
       }
 
       .tool-body {
-        display: grid;
-        gap: 12px;
-        padding: 16px;
+        padding: 24px;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        flex: 1;
+        overflow-y: auto;
       }
 
-      .search-grid {
+      /* Search component layouts */
+      .search-form {
         display: grid;
-        gap: 10px;
-        grid-template-columns: minmax(0, 1fr) 92px;
+        grid-template-columns: 2fr 1.2fr 100px auto;
+        gap: 16px;
+        align-items: flex-end;
+        border-bottom: 1px solid var(--border-color);
+        padding-bottom: 20px;
+      }
+      
+      .search-form label {
+        margin: 0;
       }
 
-      .result-list,
+      .result-list {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 16px;
+        padding-right: 0;
+        overflow-y: visible;
+      }
+
       .approval-list {
         display: grid;
-        gap: 8px;
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        gap: 16px;
+        padding-right: 0;
+        overflow-y: visible;
+      }
+
+      /* Catalog file upload styles */
+      .upload-layout {
+        display: grid;
+        grid-template-columns: 340px 1fr;
+        gap: 24px;
+        align-items: stretch;
+        flex: 1;
+      }
+
+      .upload-controls {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .upload-drop {
+        flex: 1;
+        min-height: 200px !important;
+      }
+
+      #uploadResult {
+        flex: 1;
+        height: 100%;
+        margin: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      #uploadResult.upload-output {
+        display: block;
+        text-align: left;
       }
 
       .result,
       .approval,
       .empty,
       .upload-output {
-        background: var(--panel-subtle);
-        border: 1px solid var(--line);
-        border-radius: var(--radius);
-        color: var(--ink);
-        padding: 12px;
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-md);
+        background: var(--bg-tertiary);
+        transition: all var(--transition-fast);
       }
 
+      /* Product search result item button */
       .result {
+        display: flex;
+        flex-direction: column;
         align-items: flex-start;
-        display: grid;
-        gap: 4px;
-        min-height: auto;
-        text-align: left;
         width: 100%;
+        padding: 12px 14px;
+        text-align: left;
+        cursor: pointer;
+        background: rgba(255, 255, 255, 0.015);
       }
 
       .result:hover {
-        background: #f3f1ea;
+        background: rgba(255, 255, 255, 0.04);
+        border-color: var(--primary);
+        transform: translateY(-1.5px);
+        box-shadow: 0 4px 10px rgba(16, 185, 129, 0.08);
       }
 
-      .result strong,
-      .approval strong {
+      .result strong {
         font-size: 14px;
+        font-weight: 600;
+        color: var(--text-primary);
+        line-height: 1.4;
       }
 
-      .meta {
-        color: var(--muted);
+      .result .meta {
+        color: var(--text-secondary);
         font-size: 12px;
-        line-height: 1.45;
-      }
-
-      .empty {
-        color: var(--muted);
-        line-height: 1.5;
-        min-height: 78px;
-      }
-
-      .upload-drop {
-        align-items: center;
-        background: var(--panel-subtle);
-        border: 1px dashed var(--line-strong);
-        border-radius: var(--radius);
+        margin-top: 4px;
         display: flex;
-        min-height: 82px;
+        align-items: center;
+        gap: 8px;
+        font-weight: 500;
+      }
+
+      /* Upload drag & drop zone design */
+      .upload-drop {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(255, 255, 255, 0.01);
+        border: 1.5px dashed var(--border-color);
+        border-radius: var(--radius-md);
+        min-height: 96px;
+        padding: 16px;
+        cursor: pointer;
+        transition: all var(--transition-normal);
+        text-align: center;
+      }
+
+      .upload-drop:hover {
+        border-color: var(--primary);
+        background: rgba(16, 185, 129, 0.02);
+      }
+      
+      .upload-drop-content {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        color: var(--text-secondary);
+      }
+      
+      .upload-drop-content svg {
+        color: var(--text-muted);
+        transition: color var(--transition-fast);
+      }
+      
+      .upload-drop:hover .upload-drop-content svg {
+        color: var(--primary);
+      }
+      
+      .upload-drop-text {
+        font-size: 13px;
+        font-weight: 500;
+      }
+      
+      .upload-drop-text strong {
+        color: var(--primary);
+        font-weight: 650;
+      }
+
+      .upload-drop-subtext {
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+
+      /* Approval cards style */
+      .approval {
         padding: 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        background: rgba(255, 255, 255, 0.01);
+      }
+
+      .approval strong {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--accent-hover);
+        letter-spacing: 0.02em;
       }
 
       .approval p {
-        color: var(--ink);
-        line-height: 1.5;
-        margin: 6px 0;
+        color: var(--text-primary);
+        line-height: 1.45;
+        margin: 2px 0 4px;
+        font-size: 13px;
+      }
+      
+      .approval .meta {
+        font-size: 11px;
+        color: var(--warning);
+        background: rgba(245, 158, 11, 0.08);
+        padding: 3px 8px;
+        border-radius: var(--radius-sm);
+        width: fit-content;
+        font-weight: 500;
+        border: 1px solid rgba(245, 158, 11, 0.15);
       }
 
       .approval-actions {
-        display: grid;
+        display: flex;
         gap: 8px;
-        grid-template-columns: 1fr 1fr;
-        margin-top: 10px;
+        margin-top: 6px;
       }
 
+      .approval-actions button {
+        flex: 1;
+        min-height: 34px;
+        font-size: 12px;
+        padding: 0 10px;
+      }
+
+      /* Floating Snackbar Toast Alerts */
       .toast {
-        border-radius: var(--radius);
-        display: none;
-        font-size: 13px;
-        font-weight: 700;
-        line-height: 1.45;
-        padding: 10px 12px;
+        border-radius: var(--radius-md);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 13.5px;
+        font-weight: 600;
+        line-height: 1.4;
+        padding: 12px 18px;
+        position: fixed;
+        bottom: 24px;
+        right: 24px;
+        z-index: 1000;
+        box-shadow: var(--shadow-lg);
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border-color);
+        color: var(--text-primary);
+        transform: translateY(120px);
+        opacity: 0;
+        transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease;
+        pointer-events: none;
       }
 
       .toast.show {
-        display: block;
+        transform: translateY(0);
+        opacity: 1;
+        pointer-events: auto;
       }
 
       .toast.ok {
-        background: #e3f5ec;
-        color: #0f6844;
+        border-left: 4px solid var(--success);
       }
 
       .toast.bad {
-        background: #fde8e5;
-        color: #9f312b;
+        border-left: 4px solid var(--danger);
       }
 
-      @media (max-width: 1100px) {
+      /* Responsive Rules */
+      @media (max-width: 1080px) {
         .app {
           grid-template-columns: 1fr;
         }
 
         .sidebar {
-          background: rgba(247, 246, 242, 0.92);
           min-height: auto;
-          position: static;
+          position: sticky;
+          top: 0;
+          flex-direction: row;
+          align-items: center;
+          justify-content: space-between;
+          padding: 16px 24px;
+          border-right: none;
+          border-bottom: 1px solid var(--border-color);
+          backdrop-filter: blur(12px);
+          background: rgba(11, 12, 16, 0.8);
+        }
+
+        .logo p {
+          display: none;
         }
 
         .nav {
-          grid-template-columns: repeat(4, minmax(0, 1fr));
+          display: flex;
+          gap: 4px;
+        }
+        
+        .nav a {
+          min-height: 36px;
+          padding: 0 10px;
+          font-size: 13px;
+        }
+        
+        .nav a.active {
+          border-left: none;
+          border-bottom: 2px solid var(--primary);
+          padding-left: 10px;
         }
 
         .sidebar-footer {
-          margin-top: 0;
+          display: none; /* hidden on top mobile navigation */
+        }
+
+        .main {
+          padding: 24px;
         }
 
         .masthead {
-          align-items: stretch;
           flex-direction: column;
+          gap: 20px;
         }
 
         .token-bar {
-          min-width: 0;
+          min-width: 100%;
         }
 
         .workspace {
@@ -606,51 +1093,56 @@
         }
 
         .chat-panel {
-          min-height: 620px;
+          min-height: 600px;
+          height: 60vh;
         }
       }
 
       @media (max-width: 680px) {
-        .main,
         .sidebar {
-          padding: 18px;
+          padding: 12px 16px;
+        }
+        
+        .logo h1 {
+          font-size: 16px;
+        }
+
+        .logo-icon-wrapper {
+          width: 28px;
+          height: 28px;
+          font-size: 13px;
+        }
+        
+        .nav a span {
+          display: none; /* Icon-only nav on very small viewports */
+        }
+        
+        .nav a {
+          justify-content: center;
+          width: 38px;
+        }
+
+        .main {
+          padding: 16px;
         }
 
         .masthead h2 {
-          font-size: 32px;
+          font-size: 24px;
         }
 
-        .nav,
-        .token-actions,
-        .search-grid,
-        .approval-actions {
+        .search-options-grid,
+        .token-actions {
           grid-template-columns: 1fr;
-        }
-
-        .panel-head,
-        .tool-head,
-        .composer-actions {
-          align-items: stretch;
-          flex-direction: column;
-        }
-
-        .message {
-          max-width: 100%;
-        }
-
-        .composer-actions button,
-        .tool-body button,
-        .token-actions button {
-          width: 100%;
         }
       }
     </style>
   </head>
   <body>
     <div class="app">
+      <!-- Sidebar navigation -->
       <aside class="sidebar">
         <div class="logo">
-          <span class="logo-mark">SS</span>
+          <div class="logo-icon-wrapper">SS</div>
           <div>
             <h1>SmartShop AI</h1>
             <p>Control surface cho search, chat, catalog và human review.</p>
@@ -658,10 +1150,22 @@
         </div>
 
         <nav class="nav" aria-label="Primary">
-          <a href="#assistant">Assistant</a>
-          <a href="#search">Search</a>
-          <a href="#catalog">Catalog</a>
-          <a href="#approvals">Approvals</a>
+          <a href="#assistant" class="active" id="nav-assistant">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
+            <span>Assistant</span>
+          </a>
+          <a href="#search" id="nav-search">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+            <span>Search</span>
+          </a>
+          <a href="#catalog" id="nav-catalog">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12V7H3v5"/><path d="M3 12v5a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5"/><path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2"/><path d="M12 5v14"/><path d="M3 12h18"/></svg>
+            <span>Catalog</span>
+          </a>
+          <a href="#approvals" id="nav-approvals">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+            <span>Approvals</span>
+          </a>
         </nav>
 
         <div class="sidebar-footer">
@@ -669,14 +1173,18 @@
             <span id="healthDot" class="dot"></span>
             <span id="healthText">Checking API</span>
           </div>
-          <button class="secondary" id="openDocs" type="button">Open API docs</button>
+          <button class="secondary" id="openDocs" type="button">
+            <span>API Docs</span>
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+          </button>
         </div>
       </aside>
 
+      <!-- Main workspace -->
       <main class="main">
         <header class="masthead">
           <div>
-            <p class="eyebrow">Production console</p>
+            <p class="eyebrow"><span class="eyebrow-dot"></span>Production console</p>
             <h2>Một workspace gọn để vận hành SmartShop AI.</h2>
             <p>
               Trò chuyện với agent, tìm kiếm catalog, upload dữ liệu mới và xử lý
@@ -688,12 +1196,15 @@
             <label>
               Bearer token
               <div class="token-actions">
-                <input
-                  id="tokenInput"
-                  autocomplete="off"
-                  placeholder="Paste token"
-                  type="password"
-                />
+                <div class="token-input-wrapper">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                  <input
+                    id="tokenInput"
+                    autocomplete="off"
+                    placeholder="Paste Bearer token..."
+                    type="password"
+                  />
+                </div>
                 <button class="primary" id="saveToken" type="button">Save</button>
                 <button class="ghost" id="clearToken" type="button">Clear</button>
               </div>
@@ -703,6 +1214,7 @@
         </header>
 
         <div class="workspace">
+          <!-- Left Main Area: Chat Assistant -->
           <section id="assistant" class="surface chat-panel">
             <div class="panel-head">
               <div class="panel-title">
@@ -712,55 +1224,76 @@
               <div class="session-chip" id="sessionChip">session</div>
             </div>
 
+            <!-- Chat History Area -->
             <div id="chatLog" class="chat-log">
-              <div class="empty">
-                Bắt đầu bằng một câu hỏi về chính sách hoặc yêu cầu gợi ý sản phẩm.
+              <div class="chat-welcome">
+                <svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="url(#welcomeGrad)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 2a10 10 0 0 1 7.54 16.59l-1.42-1.42A8 8 0 1 0 12 20v2a10 10 0 0 1-10-10A10 10 0 0 1 12 2z"/>
+                  <path d="M12 6a6 6 0 1 1-6 6c0-1.66.67-3.16 1.76-4.24l-1.42-1.42A8 8 0 0 0 4 12c0 4.42 3.58 8 8 8a8 8 0 0 0 8-8c0-2.21-.9-4.21-2.34-5.66L12 6z"/>
+                  <circle cx="12" cy="12" r="2" fill="#10b981"/>
+                  <defs>
+                    <linearGradient id="welcomeGrad" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
+                      <stop stop-color="#10b981"/>
+                      <stop offset="1" stop-color="#6366f1"/>
+                    </linearGradient>
+                  </defs>
+                </svg>
+                <h3>Bắt đầu trò chuyện với SmartShop AI</h3>
+                <p>Đặt câu hỏi về chính sách bảo hành, hoàn tiền hoặc yêu cầu gợi ý sản phẩm từ catalog.</p>
               </div>
             </div>
 
+            <!-- Text Entry & Actions -->
             <div class="composer">
               <div class="prompt-row">
-                <button class="ghost quick-prompt" type="button">
+                <button class="quick-prompt" type="button">
                   Chính sách giao hàng?
                 </button>
-                <button class="ghost quick-prompt" type="button">
+                <button class="quick-prompt" type="button">
                   Tìm tai nghe chống ồn dưới 200 USD
                 </button>
-                <button class="ghost quick-prompt" type="button">
+                <button class="quick-prompt" type="button">
                   Tôi muốn hoàn tiền đơn bị hỏng
                 </button>
               </div>
-              <label>
-                Message
+              <div class="composer-input-area">
                 <textarea
                   id="chatMessage"
                   placeholder="Ask the assistant about products, policies or support cases..."
                 ></textarea>
-              </label>
-              <div class="composer-actions">
-                <span class="hint">Streaming response qua endpoint /chat.</span>
-                <div class="prompt-row">
-                  <button class="secondary" id="newSession" type="button">New session</button>
-                  <button class="primary" id="sendChat" type="button">Send message</button>
+                <div class="composer-actions-inside">
+                  <span class="hint">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+                    Streaming via SSE (/chat)
+                  </span>
+                  <div class="composer-btn-group">
+                    <button class="secondary" id="newSession" type="button">New session</button>
+                    <button class="primary" id="sendChat" type="button">Send message</button>
+                  </div>
                 </div>
               </div>
             </div>
           </section>
 
+          <!-- Right Sidebar Area: Utility Tools -->
           <aside class="rail">
+            <!-- Product Vector Search -->
             <section id="search" class="surface tool">
               <div class="tool-head">
                 <div>
-                  <h3>Product search</h3>
-                  <p>Query vector search and log clicks from selected products.</p>
+                  <h3>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                    Product search
+                  </h3>
+                  <p>Query vector search and log clicks from products.</p>
                 </div>
               </div>
               <div class="tool-body">
-                <label>
-                  Query
-                  <input id="searchQuery" placeholder="headphones" />
-                </label>
-                <div class="search-grid">
+                <div class="search-form">
+                  <label>
+                    Query
+                    <input id="searchQuery" placeholder="e.g. headphones, running shoes..." />
+                  </label>
                   <label>
                     Category
                     <input id="searchCategory" placeholder="Electronics" />
@@ -769,41 +1302,60 @@
                     Top K
                     <input id="searchTopK" min="1" max="50" type="number" value="5" />
                   </label>
+                  <button class="primary" id="runSearch" type="button">Search products</button>
                 </div>
-                <button class="primary" id="runSearch" type="button">Search products</button>
                 <div id="searchResults" class="result-list">
-                  <div class="empty">Search results will appear here.</div>
+                  <div class="empty">Kết quả tìm kiếm sẽ hiển thị tại đây.</div>
                 </div>
               </div>
             </section>
 
+            <!-- Catalog ETL Upload -->
             <section id="catalog" class="surface tool">
               <div class="tool-head">
                 <div>
-                  <h3>Catalog upload</h3>
-                  <p>Submit CSV data to the ETL pipeline.</p>
+                  <h3>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12V7H3v5"/><path d="M3 12v5a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5"/><path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2"/><path d="M12 5v14"/><path d="M3 12h18"/></svg>
+                    Catalog upload
+                  </h3>
+                  <p>Submit CSV data to the Spark ETL pipeline.</p>
                 </div>
               </div>
               <div class="tool-body">
-                <label class="upload-drop">
-                  <input id="catalogFile" accept=".csv,text/csv" type="file" />
-                </label>
-                <button class="primary" id="uploadCatalog" type="button">Upload CSV</button>
-                <div id="uploadResult" class="empty">Upload status will appear here.</div>
+                <div class="upload-layout">
+                  <div class="upload-controls">
+                    <label class="upload-drop" for="catalogFile">
+                      <input id="catalogFile" accept=".csv,text/csv" type="file" style="display: none;" />
+                      <div class="upload-drop-content">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
+                        <span class="upload-drop-text">Kéo thả file CSV hoặc <strong>chọn file</strong></span>
+                        <span class="upload-drop-subtext">Hỗ trợ file định dạng .csv</span>
+                      </div>
+                    </label>
+                    <button class="primary" id="uploadCatalog" type="button">Upload CSV</button>
+                  </div>
+                  <div id="uploadResult" class="empty">Trạng thái upload file sẽ hiển thị tại đây.</div>
+                </div>
               </div>
             </section>
 
+            <!-- Human Review Escapements -->
             <section id="approvals" class="surface tool">
               <div class="tool-head">
                 <div>
-                  <h3>Human approvals</h3>
-                  <p>Review pending escalations from the assistant.</p>
+                  <h3>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+                    Human approvals
+                  </h3>
+                  <p>Review pending escalations from assistant.</p>
                 </div>
-                <button class="secondary" id="loadApprovals" type="button">Refresh</button>
+                <button class="secondary" id="loadApprovals" type="button">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>
+                </button>
               </div>
               <div class="tool-body">
                 <div id="approvalList" class="approval-list">
-                  <div class="empty">Pending approvals will appear here.</div>
+                  <div class="empty">Không có yêu cầu chờ duyệt.</div>
                 </div>
               </div>
             </section>
@@ -812,6 +1364,61 @@
       </main>
     </div>
 
+    <!-- Active Navigation and Tab Switcher script -->
+    <script>
+      function switchTab(hash) {
+        const targetId = hash || "#assistant";
+        const navLinks = document.querySelectorAll('.nav a');
+        
+        // 1. Update navigation active state
+        navLinks.forEach(link => {
+          if (link.getAttribute("href") === targetId) {
+            link.classList.add('active');
+          } else {
+            link.classList.remove('active');
+          }
+        });
+
+        // 2. Select major sections
+        const assistant = document.querySelector("#assistant");
+        const rail = document.querySelector(".rail");
+        const search = document.querySelector("#search");
+        const catalog = document.querySelector("#catalog");
+        const approvals = document.querySelector("#approvals");
+
+        if (!assistant || !rail) return;
+
+        // Hide everything first
+        assistant.style.display = "none";
+        rail.style.display = "none";
+        if (search) search.style.display = "none";
+        if (catalog) catalog.style.display = "none";
+        if (approvals) approvals.style.display = "none";
+
+        // Show active tab
+        if (targetId === "#assistant") {
+          assistant.style.display = "flex";
+        } else {
+          rail.style.display = "grid";
+          const targetSection = document.querySelector(targetId);
+          if (targetSection) {
+            targetSection.style.display = "flex";
+            targetSection.style.flexDirection = "column";
+            targetSection.style.height = "100%";
+          }
+        }
+      }
+
+      // Initialize switchTab hooks
+      window.addEventListener('hashchange', () => switchTab(window.location.hash));
+      window.addEventListener('resize', () => switchTab(window.location.hash));
+      window.addEventListener('DOMContentLoaded', () => switchTab(window.location.hash));
+      
+      // Direct call on initial execution
+      switchTab(window.location.hash);
+    </script>
+
+    <!-- Original Client JavaScript Logic (Unaltered, maintaining 100% compatibility) -->
     <script>
       const $ = (selector) => document.querySelector(selector);
       const state = {
@@ -870,6 +1477,19 @@
           .replaceAll("'", "&#039;");
       }
 
+      // Catalog file name update when loaded
+      $("#catalogFile").addEventListener("change", (e) => {
+        const file = e.target.files[0];
+        if (file) {
+          const container = $(".upload-drop-content");
+          container.innerHTML = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M9 15h6"/><path d="M9 11h6"/></svg>
+            <span class="upload-drop-text" style="color: var(--primary-hover)">${escapeHtml(file.name)}</span>
+            <span class="upload-drop-subtext">${(file.size / 1024).toFixed(1)} KB · Sẵn sàng tải lên</span>
+          `;
+        }
+      });
+
       function updateSessionChip() {
         $("#sessionChip").textContent = `session ${state.sessionId.slice(0, 8)}`;
       }
@@ -890,7 +1510,7 @@
 
       function appendMessage(role, text) {
         const chatLog = $("#chatLog");
-        if (chatLog.querySelector(".empty")) {
+        if (chatLog.querySelector(".chat-welcome") || chatLog.querySelector(".empty")) {
           chatLog.innerHTML = "";
         }
         const item = document.createElement("div");
@@ -1134,7 +1754,24 @@
       $("#newSession").addEventListener("click", () => {
         state.sessionId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
         updateSessionChip();
-        $("#chatLog").innerHTML = '<div class="empty">Đã tạo session mới.</div>';
+        $("#chatLog").innerHTML = `
+          <div class="chat-welcome">
+            <svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="url(#welcomeGrad)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2a10 10 0 0 1 7.54 16.59l-1.42-1.42A8 8 0 1 0 12 20v2a10 10 0 0 1-10-10A10 10 0 0 1 12 2z"/>
+              <path d="M12 6a6 6 0 1 1-6 6c0-1.66.67-3.16 1.76-4.24l-1.42-1.42A8 8 0 0 0 4 12c0 4.42 3.58 8 8 8a8 8 0 0 0 8-8c0-2.21-.9-4.21-2.34-5.66L12 6z"/>
+              <circle cx="12" cy="12" r="2" fill="#10b981"/>
+              <defs>
+                <linearGradient id="welcomeGrad" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
+                  <stop stop-color="#10b981"/>
+                  <stop offset="1" stop-color="#6366f1"/>
+                </linearGradient>
+              </defs>
+            </svg>
+            <h3>Session mới đã sẵn sàng</h3>
+            <p>Trò chuyện của bạn đã được reset. Nhập tin nhắn đầu tiên để bắt đầu.</p>
+          </div>
+        `;
+        showNotice("Đã tạo session mới.");
       });
 
       document.querySelectorAll(".quick-prompt").forEach((button) => {
@@ -1155,6 +1792,13 @@
           return;
         }
         try {
+          // Visual click feedback on product results
+          const btn = event.target.closest("[data-product-id]");
+          btn.style.borderColor = "var(--accent)";
+          setTimeout(() => {
+            btn.style.borderColor = "var(--primary)";
+          }, 400);
+
           await fetch("/events/click", {
             method: "POST",
             headers: authHeaders({ "Content-Type": "application/json" }),
@@ -1166,6 +1810,7 @@
               metadata: { source: "web_console" },
             }),
           });
+          showNotice(`Logged click for product: ${productId.slice(0, 12)}...`);
         } catch (error) {
           showNotice(error.message, "bad");
         }
@@ -1180,6 +1825,8 @@
       });
 
       checkHealth();
+      // Periodically check api connection health
+      window.setInterval(checkHealth, 15000);
     </script>
   </body>
 </html>
