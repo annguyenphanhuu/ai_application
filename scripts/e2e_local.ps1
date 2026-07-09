@@ -3,7 +3,7 @@ param(
     [int]$MaxProducts = 5000,
     [int]$MaxReviews = 20000,
     [string]$RawOutputDir = "data/raw/amazon_reviews_2023",
-    [string]$ProcessedOutput = "data/processed/products_processed",
+    [string]$ProcessedOutput = "data/processed/amazon_reviews_2023_flow_smoke",
     [string]$TrackingUri = "sqlite:///mlflow.db",
     [string]$ExperimentName = "SmartShop_Rating_Classification",
     [string]$ModelName = "SmartShopRatingClassifier",

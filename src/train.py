@@ -28,7 +28,7 @@ from src.model_registry import (
 )
 
 
-DEFAULT_INPUT_PATH = "data/processed/products_processed"
+DEFAULT_INPUT_PATH = "data/processed/amazon_reviews_2023_flow_smoke"
 DEFAULT_TRACKING_URI = "sqlite:///mlflow.db"
 DEFAULT_EXPERIMENT_NAME = "SmartShop_Rating_Classification"
 DEFAULT_MODEL_NAME = "SmartShopRatingClassifier"

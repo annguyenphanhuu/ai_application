@@ -64,7 +64,7 @@ def sample_products() -> pd.DataFrame:
         ("data/products.csv", "csv"),
         ("data/products.jsonl", "json"),
         ("data/products.json", "json"),
-        ("data/processed/products_processed", "parquet"),
+        ("data/processed/amazon_reviews_2023_flow_smoke", "parquet"),
     ],
 )
 def test_infer_input_format(path, expected):

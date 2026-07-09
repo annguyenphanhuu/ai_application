@@ -63,7 +63,7 @@ The production slice is the smallest useful loop that proves the tools work
 together:
 
 1. Materialize raw product and review data.
-2. Run Spark ETL into `data/processed/products_processed`.
+2. Run Spark ETL into `data/processed/amazon_reviews_2023_flow_smoke`.
 3. Train and register a baseline model in MLflow.
 4. Promote the candidate model to the `champion` alias.
 5. Start Docker Compose services.
@@ -100,7 +100,7 @@ python -m jobs.amazon_reviews_2023 `
 python -m jobs.spark_etl `
   --input-products data/raw/amazon_reviews_2023/combined/meta.jsonl `
   --input-reviews data/raw/amazon_reviews_2023/combined/reviews.jsonl `
-  --output-path data/processed/products_processed `
+  --output-path data/processed/amazon_reviews_2023_flow_smoke `
   --output-format parquet `
   --master "local[*]"
 ```
@@ -109,7 +109,7 @@ python -m jobs.spark_etl `
 
 ```powershell
 python -m src.train `
-  --input-path data/processed/products_processed `
+  --input-path data/processed/amazon_reviews_2023_flow_smoke `
   --tracking-uri sqlite:///mlflow.db `
   --experiment-name SmartShop_Rating_Classification `
   --model-name SmartShopRatingClassifier `

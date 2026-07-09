@@ -163,14 +163,14 @@ Chạy test và ETL local:
 
 ```bash
 python -m pytest tests/test_spark_etl_config.py
-rm -rf data/processed/products_processed
+rm -rf data/processed/amazon_reviews_2023_flow_smoke
 python -m jobs.spark_etl \
-  --input-products data/raw/amazon_products.jsonl \
-  --input-reviews data/raw/amazon_reviews.jsonl \
-  --output-path data/processed/products_processed \
+  --input-products data/raw/amazon_reviews_2023/combined/meta.jsonl \
+  --input-reviews data/raw/amazon_reviews_2023/combined/reviews.jsonl \
+  --output-path data/processed/amazon_reviews_2023_flow_smoke \
   --output-format parquet \
   --master "local[*]"
-ls -la data/processed/products_processed
+ls -la data/processed/amazon_reviews_2023_flow_smoke
 ```
 
 #### Ghi Chú Chạy Project Bằng Conda Trên PowerShell
@@ -195,7 +195,7 @@ Chạy Phase 3 trên PowerShell:
 
 ```powershell
 python -m src.train `
-  --input-path data/processed/products_processed `
+  --input-path data/processed/amazon_reviews_2023_flow_smoke `
   --tracking-uri sqlite:///mlflow.db `
   --experiment-name SmartShop_Rating_Classification `
   --model-name SmartShopRatingClassifier
@@ -211,17 +211,17 @@ Lưu ý: Spark local trên Windows vẫn có thể cần `HADOOP_HOME` và `winu
 
 *   **Công nghệ sử dụng**: Scikit-learn, Pandas, PyArrow, MLflow.
 *   **Các bước thực hiện**:
-    1. Đọc bảng `data/processed/products_processed` do Phase 2 sinh ra.
+    1. Đọc bảng `data/processed/amazon_reviews_2023_flow_smoke` do Phase 2 sinh ra.
     2. Tạo text feature từ `title`, `description`, `brand`, `category`, `price_tier`.
     3. Tạo nhãn baseline: `avg_rating >= 4.0` là sản phẩm rating cao.
     4. Train pipeline `TfidfVectorizer + LogisticRegression`.
-    5. Log params, metrics và model artifact vào MLflow local (`sqlite:///mlflow.db`); có thể bật đăng ký model bằng `--register-model` khi cần.
+    5. Log params, metrics và model artifact vào MLflow local (`sqlite:///mlflow.db`); có thể bật đăng ký model bằng `--register-model` when cần.
 
 #### Cách Chạy Phase 3 (`src/train.py`)
 ```bash
 python -m pip install -r requirements.txt
 python -m src.train \
-  --input-path data/processed/products_processed \
+  --input-path data/processed/amazon_reviews_2023_flow_smoke \
   --tracking-uri sqlite:///mlflow.db \
   --experiment-name SmartShop_Rating_Classification \
   --model-name SmartShopRatingClassifier \
@@ -373,7 +373,7 @@ Index dữ liệu đã xử lý từ Phase 2:
 
 ```bash
 python -m src.vector_store index \
-  --input-path data/processed/products_processed \
+  --input-path data/processed/amazon_reviews_2023_flow_smoke \
   --collection-name products
 ```
 
@@ -869,7 +869,7 @@ Luu y ve encoder search trong API image:
 Luu y ve Qdrant va du lieu search:
 
 * Container Qdrant moi khoi dong chi tao service, khong tu co du lieu san pham. Neu collection rong thi `/search` se khong tra ket qua co y nghia.
-* Co the index du lieu that tu `data/processed/products_processed` bang service `vector-indexer` trong Compose. Mac dinh indexer dung hashing de khop voi API image nhe; neu dung embedding that, hay build API bang target `full-runtime`, set API va indexer cung `SMARTSHOP_EMBEDDING_BACKEND=sentence-transformers`, roi index lai collection.
+* Co the index du lieu that tu `data/processed/amazon_reviews_2023_flow_smoke` bang service `vector-indexer` trong Compose. Mac dinh indexer dung hashing de khop voi API image nhe; neu dung embedding that, hay build API bang target `full-runtime`, set API va indexer cung `SMARTSHOP_EMBEDDING_BACKEND=sentence-transformers`, roi index lai collection.
 * Sau khi index lai, Redis co the van giu cache ket qua search cu. Xoa cache bang `docker compose exec -T redis redis-cli FLUSHDB`.
 
 Chay local bang Docker Compose:

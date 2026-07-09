@@ -72,7 +72,7 @@ def test_compose_defines_optional_vector_indexer():
     assert "python" in compose
     assert "src.vector_store" in compose
     assert (
-        "${SMARTSHOP_VECTOR_INPUT_PATH:-/app/data/processed/products_processed}"
+        "${SMARTSHOP_VECTOR_INPUT_PATH:-/app/data/processed/amazon_reviews_2023_flow_smoke}"
         in compose
     )
     assert "./data/processed:/app/data/processed:ro" in compose

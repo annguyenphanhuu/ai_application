@@ -21,7 +21,7 @@ DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_VECTOR_SIZE = 384
 DEFAULT_QDRANT_HOST = "localhost"
 DEFAULT_QDRANT_PORT = 6333
-DEFAULT_INPUT_PATH = "data/processed/products_processed"
+DEFAULT_INPUT_PATH = "data/processed/amazon_reviews_2023_flow_smoke"
 DEFAULT_EMBEDDING_BACKEND = "sentence-transformers"
 TEXT_COLUMNS = ("title", "description", "brand", "category")
 

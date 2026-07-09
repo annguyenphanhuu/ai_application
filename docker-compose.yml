@@ -83,7 +83,7 @@ services:
       - src.vector_store
       - index
       - --input-path
-      - ${SMARTSHOP_VECTOR_INPUT_PATH:-/app/data/processed/products_processed}
+      - ${SMARTSHOP_VECTOR_INPUT_PATH:-/app/data/processed/amazon_reviews_2023_flow_smoke}
       - --collection-name
       - ${QDRANT_COLLECTION_NAME:-products}
       - --embedding-backend

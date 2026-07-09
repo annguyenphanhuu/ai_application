@@ -410,7 +410,7 @@ def materialize(config: AmazonReviews2023Config) -> dict[str, Any]:
         "python -m jobs.spark_etl "
         f"--input-products {config.combined_meta_output_path} "
         f"--input-reviews {config.combined_reviews_output_path} "
-        "--output-path data/processed/products_processed "
+        "--output-path data/processed/amazon_reviews_2023_flow_smoke "
         "--output-format parquet "
         "--master local[*]"
     )

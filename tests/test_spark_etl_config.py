@@ -75,8 +75,8 @@ def test_infer_format_rejects_unknown_format():
 
 def test_windows_local_spark_requires_winutils(monkeypatch):
     config = EtlConfig(
-        products_input="data/raw/amazon_products.jsonl",
-        products_output="data/processed/products_processed",
+        products_input="data/raw/amazon_reviews_2023/combined/meta.jsonl",
+        products_output="data/processed/amazon_reviews_2023_flow_smoke",
         output_format="parquet",
         master="local[*]",
     )
@@ -94,8 +94,8 @@ def test_windows_local_spark_accepts_configured_winutils(monkeypatch, tmp_path):
     winutils.parent.mkdir(parents=True)
     winutils.write_text("", encoding="utf-8")
     config = EtlConfig(
-        products_input="data/raw/amazon_products.jsonl",
-        products_output="data/processed/products_processed",
+        products_input="data/raw/amazon_reviews_2023/combined/meta.jsonl",
+        products_output="data/processed/amazon_reviews_2023_flow_smoke",
         output_format="parquet",
         master="local[*]",
     )

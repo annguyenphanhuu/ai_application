@@ -54,7 +54,7 @@ with DAG(
         )
         products_output = Variable.get(
             "SMARTSHOP_PRODUCTS_OUTPUT",
-            default_var="dbfs:/mnt/processed-data/products_processed",
+            default_var="dbfs:/mnt/processed-data/amazon_reviews_2023_flow_smoke",
         )
         output_format = Variable.get("SMARTSHOP_OUTPUT_FORMAT", default_var="delta")
 
@@ -97,7 +97,7 @@ with DAG(
         )
         products_output = Variable.get(
             "SMARTSHOP_PRODUCTS_OUTPUT",
-            default_var=f"{workspace_path}/data/processed/products_processed",
+            default_var=f"{workspace_path}/data/processed/amazon_reviews_2023_flow_smoke",
         )
         output_format = Variable.get("SMARTSHOP_OUTPUT_FORMAT", default_var="parquet")
         max_products = Variable.get("SMARTSHOP_MAX_PRODUCTS", default_var="5000")
