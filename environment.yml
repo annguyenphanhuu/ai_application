@@ -31,3 +31,4 @@ dependencies:
       - langgraph>=0.0.10
       - huggingface-hub>=0.24.0
       - requests>=2.32.0
+      - pyjwt[crypto]>=2.8.0

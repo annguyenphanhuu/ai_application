@@ -237,7 +237,20 @@ class QdrantVectorBackend:
                 "Install it with `pip install -r requirements.txt` or update the Conda env."
             ) from exc
 
-        self.client = QdrantClient(host=host, port=port)
+        if host == ":memory:":
+            self.client = QdrantClient(location=":memory:")
+        else:
+            try:
+                client = QdrantClient(host=host, port=port, timeout=2.0)
+                client.get_collections()
+                self.client = client
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"Could not connect to Qdrant at {host}:{port} ({exc}). "
+                    "Falling back to local in-memory Qdrant client (:memory:)."
+                )
+                self.client = QdrantClient(location=":memory:")
 
     def init_collection(self, collection_name: str, vector_size: int) -> None:
         from qdrant_client.models import Distance, VectorParams

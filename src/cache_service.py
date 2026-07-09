@@ -214,6 +214,109 @@ def normalize_query(query: str) -> str:
     return normalized
 
 
+class MemoryRedisClient:
+    def __init__(self):
+        self._data = {}
+        self._ttls = {}
+        self._lists = {}
+
+    def ping(self):
+        return True
+
+    def get(self, name: str) -> Any:
+        import time
+        if name in self._ttls and self._ttls[name] < time.time():
+            self.delete(name)
+            return None
+        return self._data.get(name)
+
+    def setex(self, name: str, seconds: int, value: str) -> Any:
+        import time
+        self._data[name] = value
+        self._ttls[name] = time.time() + seconds
+        return True
+
+    def delete(self, *names: str) -> Any:
+        count = 0
+        for name in names:
+            if name in self._data:
+                del self._data[name]
+                count += 1
+            if name in self._ttls:
+                del self._ttls[name]
+            if name in self._lists:
+                del self._lists[name]
+                count += 1
+        return count
+
+    def rpush(self, name: str, *values: str) -> Any:
+        if name not in self._lists:
+            self._lists[name] = []
+        self._lists[name].extend(values)
+        return len(self._lists[name])
+
+    def lrange(self, name: str, start: int, end: int) -> list[Any]:
+        lst = self._lists.get(name, [])
+        if not lst:
+            return []
+        end_idx = len(lst) if end == -1 else end + 1
+        start_idx = len(lst) + start if start < 0 else start
+        return lst[start_idx:end_idx]
+
+    def ltrim(self, name: str, start: int, end: int) -> Any:
+        lst = self._lists.get(name, [])
+        if not lst:
+            return True
+        start_idx = len(lst) + start if start < 0 else start
+        end_idx = len(lst) + end + 1 if end < 0 else end + 1
+        self._lists[name] = lst[start_idx:end_idx]
+        return True
+
+    def lrem(self, name: str, count: int, value: str) -> Any:
+        lst = self._lists.get(name, [])
+        if not lst:
+            return 0
+        removed = 0
+        new_lst = []
+        for item in lst:
+            if item == value:
+                removed += 1
+            else:
+                new_lst.append(item)
+        self._lists[name] = new_lst
+        return removed
+
+    def expire(self, name: str, seconds: int) -> Any:
+        import time
+        self._ttls[name] = time.time() + seconds
+        return True
+
+    def incr(self, name: str) -> int:
+        val = self._data.get(name, "0")
+        try:
+            new_val = int(val) + 1
+        except ValueError:
+            new_val = 1
+        self._data[name] = str(new_val)
+        return new_val
+
+    def ttl(self, name: str) -> int:
+        import time
+        if name not in self._ttls:
+            return -1
+        remaining = int(self._ttls[name] - time.time())
+        return max(remaining, 0)
+
+    def pipeline(self) -> Any:
+        return self
+
+    def execute(self) -> list[Any]:
+        return [1, 60]
+
+    def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> Any:
+        return [1, 59, 1]
+
+
 class RedisService:
     _TOKEN_BUCKET_SCRIPT = """
 local key = KEYS[1]
@@ -276,12 +379,29 @@ return {allowed, math.floor(tokens), reset_after}
                 "Install it with `pip install -r requirements.txt` or update the Conda env."
             ) from exc
 
-        return redis.Redis(
+        if config.host == ":memory:":
+            import logging
+            logging.getLogger(__name__).warning("Using in-memory mock Redis client (:memory:).")
+            return MemoryRedisClient()
+
+        client = redis.Redis(
             host=config.host,
             port=config.port,
             db=config.db,
             decode_responses=True,
+            socket_timeout=2.0,
+            socket_connect_timeout=2.0,
         )
+        try:
+            client.ping()
+            return client
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Could not connect to Redis at {config.host}:{config.port} ({exc}). "
+                "Falling back to in-memory mock Redis client."
+            )
+            return MemoryRedisClient()
 
     def key(self, *parts: str) -> str:
         clean_parts = [self.config.key_prefix.strip(":")]
