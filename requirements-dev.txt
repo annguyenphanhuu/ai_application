@@ -1,5 +1,7 @@
-pytest>=7.0.0
+# Pinned so CI and local runs agree on formatting/lint behaviour.
+# (An unpinned black once broke CI when a new stable style shipped.)
+pytest==9.1.1
 pytest-cov>=4.0.0
-black>=23.0.0
-flake8>=6.0.0
+black==26.5.1
+flake8==7.3.0
 testcontainers[redis]>=4.7.0

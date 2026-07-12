@@ -3,6 +3,10 @@ global:
   evaluation_interval: 15s   # Evaluate rules mỗi 15 giây
   scrape_timeout: 10s
 
+# Alert rules (điều kiện cảnh báo; cần Alertmanager để gửi notification thật)
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
 # Alertmanager (tùy chọn, bỏ qua nếu chưa cần)
 # alerting:
 #   alertmanagers:

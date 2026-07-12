@@ -357,3 +357,44 @@ def test_cli_cache_payload_is_valid_json_shape():
     key = service.set_cached_search("headphones", json.loads('[{"product_id":"P01"}]'))
 
     assert key.startswith("testshop:search:")
+
+
+def test_redis_config_reads_password_and_fallback_from_env(monkeypatch):
+    from src.cache_service import RedisConfig
+
+    monkeypatch.setenv("REDIS_PASSWORD", "s3cret")
+    monkeypatch.setenv("SMARTSHOP_ENV", "prod")
+    monkeypatch.delenv("SMARTSHOP_REDIS_ALLOW_MEMORY_FALLBACK", raising=False)
+
+    config = RedisConfig.from_env()
+
+    assert config.password == "s3cret"
+    assert config.allow_memory_fallback is False
+
+
+def test_redis_memory_fallback_allowed_in_dev(monkeypatch):
+    from src.cache_service import RedisConfig
+
+    monkeypatch.delenv("REDIS_PASSWORD", raising=False)
+    monkeypatch.setenv("SMARTSHOP_ENV", "dev")
+    monkeypatch.delenv("SMARTSHOP_REDIS_ALLOW_MEMORY_FALLBACK", raising=False)
+
+    config = RedisConfig.from_env()
+
+    assert config.password is None
+    assert config.allow_memory_fallback is True
+
+
+def test_redis_build_client_raises_without_fallback(monkeypatch):
+    import pytest as _pytest
+
+    from src.cache_service import RedisConfig, RedisService
+
+    config = RedisConfig(
+        host="redis-does-not-exist.invalid",
+        port=6379,
+        allow_memory_fallback=False,
+    )
+
+    with _pytest.raises(RuntimeError, match="In-memory fallback is disabled"):
+        RedisService._build_client(config)

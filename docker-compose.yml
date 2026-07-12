@@ -16,6 +16,8 @@ services:
       QDRANT_PORT: "6333"
       QDRANT_COLLECTION_NAME: products
       SMARTSHOP_EMBEDDING_BACKEND: ${SMARTSHOP_EMBEDDING_BACKEND:-hashing}
+      SMARTSHOP_READINESS_CHECK_QDRANT: "true"
+      SMARTSHOP_QDRANT_ALLOW_MEMORY_FALLBACK: "false"
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       SMARTSHOP_CORS_ORIGINS: ${SMARTSHOP_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173}
       SMARTSHOP_JWT_SECRET: ${SMARTSHOP_JWT_SECRET:-dev-smartshop-secret}
@@ -56,6 +58,29 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+    restart: unless-stopped
+
+  # Phase 5: background consumer that turns click events into the Redis
+  # hot-products leaderboard. Without it the user-clicks topic is write-only.
+  click-consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: ${SMARTSHOP_API_BUILD_TARGET:-runtime}
+    image: smartshop-api:latest
+    container_name: smartshop-click-consumer
+    command: ["python", "-m", "src.streaming", "consume"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    healthcheck:
+      disable: true
     restart: unless-stopped
 
   vector-indexer:
@@ -155,6 +180,7 @@ services:
       - "9090:9090"
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
       - prometheus-data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"

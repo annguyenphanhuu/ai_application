@@ -111,6 +111,7 @@ class StreamingConfig:
     redis_host: str = DEFAULT_REDIS_HOST
     redis_port: int = DEFAULT_REDIS_PORT
     redis_db: int = 0
+    redis_password: str | None = None
     hot_products_key: str = DEFAULT_HOT_PRODUCTS_KEY
     producer_max_retries: int = 3
     producer_retry_backoff_ms: int = 200
@@ -129,6 +130,7 @@ class StreamingConfig:
             redis_host=os.getenv("REDIS_HOST", DEFAULT_REDIS_HOST),
             redis_port=int(os.getenv("REDIS_PORT", str(DEFAULT_REDIS_PORT))),
             redis_db=int(os.getenv("REDIS_DB", "0")),
+            redis_password=os.getenv("REDIS_PASSWORD") or None,
             hot_products_key=os.getenv(
                 "SMARTSHOP_HOT_PRODUCTS_KEY", DEFAULT_HOT_PRODUCTS_KEY
             ),
@@ -251,12 +253,15 @@ class RedisHotProductsStore:
         db: int = 0,
         key: str = DEFAULT_HOT_PRODUCTS_KEY,
         client: Any | None = None,
+        password: str | None = None,
     ):
         self.key = key
-        self.client = client or self._build_client(host, port, db)
+        self.client = client or self._build_client(host, port, db, password)
 
     @staticmethod
-    def _build_client(host: str, port: int, db: int) -> Any:
+    def _build_client(
+        host: str, port: int, db: int, password: str | None = None
+    ) -> Any:
         try:
             import redis
         except ImportError as exc:
@@ -268,17 +273,32 @@ class RedisHotProductsStore:
             host=host,
             port=port,
             db=db,
+            password=password or os.getenv("REDIS_PASSWORD") or None,
             decode_responses=True,
             socket_connect_timeout=5,
             socket_timeout=5,
             retry_on_timeout=True,
         )
 
+    @staticmethod
+    def _flatten_for_hash(event: dict) -> dict:
+        """Redis hashes only accept scalar values; JSON-encode nested ones."""
+        flattened: dict[str, Any] = {}
+        for key, value in event.items():
+            if isinstance(value, (str, int, float, bytes)):
+                flattened[key] = value
+            else:
+                flattened[key] = json.dumps(value, ensure_ascii=False, default=str)
+        return flattened
+
     def record_click(self, product_id: str, event: dict) -> float:
         try:
             pipe = self.client.pipeline()
             pipe.zincrby(self.key, 1, product_id)
-            pipe.hset(f"product_click:last:{product_id}", mapping=event)
+            pipe.hset(
+                f"product_click:last:{product_id}",
+                mapping=self._flatten_for_hash(event),
+            )
             results = pipe.execute()
             return float(results[0])
         except Exception as exc:  # noqa: BLE001
@@ -427,13 +447,23 @@ class ClickEventConsumer:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # Defaults come from the environment (KAFKA_BOOTSTRAP_SERVERS, REDIS_HOST,
+    # ...) so the same CLI works unchanged inside Docker/Kubernetes.
+    env_config = StreamingConfig.from_env()
+
     parser = argparse.ArgumentParser(description="SmartShop Phase 5 streaming.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def add_streaming_options(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--bootstrap-servers", default=DEFAULT_BOOTSTRAP_SERVERS)
-        p.add_argument("--topic", default=DEFAULT_TOPIC)
-        p.add_argument("--dead-letter-topic", default=DEFAULT_DEAD_LETTER_TOPIC)
+        p.add_argument("--bootstrap-servers", default=env_config.bootstrap_servers)
+        p.add_argument("--topic", default=env_config.topic)
+        p.add_argument("--dead-letter-topic", default=env_config.dead_letter_topic)
+
+    def add_redis_options(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--redis-host", default=env_config.redis_host)
+        p.add_argument("--redis-port", type=int, default=env_config.redis_port)
+        p.add_argument("--redis-db", type=int, default=env_config.redis_db)
+        p.add_argument("--hot-products-key", default=env_config.hot_products_key)
 
     produce_parser = subparsers.add_parser("produce", help="Publish one click event.")
     add_streaming_options(produce_parser)
@@ -441,21 +471,17 @@ def build_parser() -> argparse.ArgumentParser:
     produce_parser.add_argument("--product-id", required=True)
     produce_parser.add_argument("--session-id")
     produce_parser.add_argument("--query")
-    produce_parser.add_argument("--max-retries", type=int, default=3)
+    produce_parser.add_argument(
+        "--max-retries", type=int, default=env_config.producer_max_retries
+    )
 
     consume_parser = subparsers.add_parser("consume", help="Consume click events.")
     add_streaming_options(consume_parser)
-    consume_parser.add_argument("--group-id", default=DEFAULT_GROUP_ID)
-    consume_parser.add_argument("--redis-host", default=DEFAULT_REDIS_HOST)
-    consume_parser.add_argument("--redis-port", type=int, default=DEFAULT_REDIS_PORT)
-    consume_parser.add_argument("--redis-db", type=int, default=0)
-    consume_parser.add_argument("--hot-products-key", default=DEFAULT_HOT_PRODUCTS_KEY)
+    consume_parser.add_argument("--group-id", default=env_config.group_id)
+    add_redis_options(consume_parser)
 
     top_parser = subparsers.add_parser("top", help="Show hot products from Redis.")
-    top_parser.add_argument("--redis-host", default=DEFAULT_REDIS_HOST)
-    top_parser.add_argument("--redis-port", type=int, default=DEFAULT_REDIS_PORT)
-    top_parser.add_argument("--redis-db", type=int, default=0)
-    top_parser.add_argument("--hot-products-key", default=DEFAULT_HOT_PRODUCTS_KEY)
+    add_redis_options(top_parser)
     top_parser.add_argument("--limit", type=int, default=10)
 
     return parser

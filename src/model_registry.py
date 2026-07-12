@@ -6,7 +6,6 @@ import argparse
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
-
 DEFAULT_TRACKING_URI = "sqlite:///mlflow.db"
 DEFAULT_MODEL_NAME = "SmartShopRatingClassifier"
 DEFAULT_MODEL_ARTIFACT_NAME = "rating_classifier"

@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: smartshop-api
+  labels:
+    app: smartshop-api
+  annotations:
+    # Requires ingress-nginx and cert-manager with a ClusterIssuer named
+    # "letsencrypt-prod" (adjust to your cluster's issuer).
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: 20m
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.smartshop.example
+      secretName: smartshop-api-tls
+  rules:
+    - host: api.smartshop.example
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: smartshop-api
+                port:
+                  name: http

@@ -234,9 +234,16 @@ class FakeKafkaProducer:
         return event
 
 
-def auth_headers(secret="test-secret", subject="user-1"):
-    token = create_access_token(subject=subject, secret=secret)
+def auth_headers(secret="test-secret", subject="user-1", scopes=None):
+    token = create_access_token(subject=subject, secret=secret, scopes=scopes)
     return {"Authorization": f"Bearer {token}"}
+
+
+def reviewer_headers(subject="reviewer-1"):
+    return auth_headers(
+        subject=subject,
+        scopes=["approvals:read", "approvals:write"],
+    )
 
 
 def build_client(
@@ -272,6 +279,16 @@ def test_health_is_public():
     assert response.json() == {"status": "ok"}
 
 
+def test_responses_carry_request_id_header():
+    client = build_client()
+
+    generated = client.get("/health")
+    provided = client.get("/health", headers={"X-Request-ID": "req-123"})
+
+    assert generated.headers["X-Request-ID"]
+    assert provided.headers["X-Request-ID"] == "req-123"
+
+
 def test_web_console_is_public():
     client = build_client()
 
@@ -298,6 +315,48 @@ def test_readiness_fails_when_redis_is_unavailable():
 
     assert response.status_code == 503
     assert response.json()["redis"] == "unavailable"
+
+
+class FakePingableSearchService(FakeSearchService):
+    def __init__(self, available=True):
+        super().__init__()
+        self.available = available
+
+    def ping(self):
+        return self.available
+
+
+def _build_readiness_client(search):
+    config = APIConfig(
+        environment="test",
+        jwt_secret="test-secret",
+        readiness_check_qdrant=True,
+    )
+    app = create_app(
+        cache_service=FakeCacheService(),
+        search_service=search,
+        config=config,
+        etl_runner=FakeETLJobRunner(),
+    )
+    return TestClient(app)
+
+
+def test_readiness_includes_qdrant_when_check_enabled():
+    client = _build_readiness_client(FakePingableSearchService(available=True))
+
+    response = client.get("/health/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "redis": "ok", "qdrant": "ok"}
+
+
+def test_readiness_fails_when_qdrant_is_unavailable():
+    client = _build_readiness_client(FakePingableSearchService(available=False))
+
+    response = client.get("/health/ready")
+
+    assert response.status_code == 503
+    assert response.json()["qdrant"] == "unavailable"
 
 
 def test_search_requires_bearer_token():
@@ -561,11 +620,11 @@ def test_approval_queue_can_be_listed_and_resolved():
     )
     client = build_client(cache=cache)
 
-    listed = client.get("/approvals/pending", headers=auth_headers())
+    listed = client.get("/approvals/pending", headers=reviewer_headers())
     resolved = client.post(
         f"/approvals/{approval.request_id}/resolve",
         json={"approved": True, "note": "ok"},
-        headers=auth_headers(subject="reviewer-1"),
+        headers=reviewer_headers(subject="reviewer-1"),
     )
 
     assert listed.status_code == 200
@@ -574,6 +633,42 @@ def test_approval_queue_can_be_listed_and_resolved():
     assert resolved.json()["status"] == "approved"
     assert resolved.json()["resolved_by"] == "reviewer-1"
     assert cache.pending_approvals == []
+
+
+def test_approvals_reject_tokens_without_reviewer_scope():
+    cache = FakeCacheService()
+    approval = cache.create_human_approval_request(
+        "S01",
+        "refund damaged order",
+        reason="damaged order",
+    )
+    client = build_client(cache=cache)
+
+    listed = client.get("/approvals/pending", headers=auth_headers())
+    resolved = client.post(
+        f"/approvals/{approval.request_id}/resolve",
+        json={"approved": True},
+        headers=auth_headers(subject="customer-1"),
+    )
+
+    assert listed.status_code == 403
+    assert "approvals:read" in listed.json()["detail"]
+    assert resolved.status_code == 403
+    assert "approvals:write" in resolved.json()["detail"]
+    assert cache.pending_approvals == [approval.request_id]
+
+
+def test_admin_scope_grants_approvals_access():
+    cache = FakeCacheService()
+    cache.create_human_approval_request("S01", "refund", reason="damaged")
+    client = build_client(cache=cache)
+
+    listed = client.get(
+        "/approvals/pending",
+        headers=auth_headers(subject="admin-1", scopes=["admin"]),
+    )
+
+    assert listed.status_code == 200
 
 
 def test_default_search_initializes_vector_collection(monkeypatch):
@@ -670,3 +765,141 @@ def test_upload_rejects_non_csv_file(tmp_path):
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Only CSV catalog uploads are supported."
+
+
+def test_upload_status_endpoints_report_etl_result(tmp_path):
+    client = build_client(upload_dir=tmp_path, etl_runner=FakeETLJobRunner())
+
+    upload = client.post(
+        "/upload",
+        files={"file": ("catalog.csv", b"product_id,title\nP01,Headphones\n")},
+        headers=auth_headers(),
+    )
+    upload_name = Path(upload.json()["saved_path"]).name
+
+    listed = client.get("/catalog/uploads", headers=auth_headers())
+    detail = client.get(f"/catalog/uploads/{upload_name}", headers=auth_headers())
+
+    assert listed.status_code == 200
+    summary = listed.json()["uploads"][0]
+    assert summary["upload_name"] == upload_name
+    assert summary["status"] == "etl_completed"
+    assert summary["etl_status"] == "completed"
+    assert detail.status_code == 200
+    assert detail.json()["etl"]["status"] == "completed"
+
+
+def test_upload_status_detail_rejects_path_traversal(tmp_path):
+    client = build_client(upload_dir=tmp_path)
+
+    response = client.get(
+        "/catalog/uploads/..%2Fsecret.csv",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code in {400, 404}
+
+
+def test_upload_status_detail_returns_404_for_unknown_upload(tmp_path):
+    client = build_client(upload_dir=tmp_path)
+
+    response = client.get(
+        "/catalog/uploads/nonexistent.csv",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 404
+
+
+class FakeRatingModelService:
+    def __init__(self, available=True):
+        self.available = available
+        self.config = SimpleNamespace(
+            model_uri="models:/SmartShopRatingClassifier@champion"
+        )
+        self.calls = []
+
+    def predict(self, products):
+        if not self.available:
+            raise RuntimeError("Rating model serving is not configured.")
+        self.calls.append(products)
+        return [
+            {
+                "product_id": product.get("product_id"),
+                "high_rating_predicted": True,
+                "high_rating_probability": 0.87,
+                "model_uri": self.config.model_uri,
+            }
+            for product in products
+        ]
+
+
+def build_rating_client(rating_model):
+    config = APIConfig(environment="test", jwt_secret="test-secret")
+    app = create_app(
+        cache_service=FakeCacheService(),
+        search_service=FakeSearchService(),
+        config=config,
+        etl_runner=FakeETLJobRunner(),
+        rating_model=rating_model,
+    )
+    return TestClient(app)
+
+
+def test_predict_rating_scores_products_with_champion_model():
+    rating_model = FakeRatingModelService()
+    client = build_rating_client(rating_model)
+
+    response = client.post(
+        "/predict/rating",
+        json={
+            "products": [
+                {
+                    "product_id": "P01",
+                    "title": "Wireless Headphones",
+                    "description": "Noise cancelling",
+                    "brand": "SoundWave",
+                    "category": "Electronics",
+                    "price_tier": "Mid-range",
+                }
+            ]
+        },
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["model_uri"].startswith("models:/")
+    assert payload["predictions"][0]["high_rating_predicted"] is True
+    assert rating_model.calls[0][0]["product_id"] == "P01"
+
+
+def test_predict_rating_returns_503_when_model_unavailable():
+    client = build_rating_client(FakeRatingModelService(available=False))
+
+    response = client.post(
+        "/predict/rating",
+        json={"products": [{"title": "Headphones"}]},
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 503
+    assert "not configured" in response.json()["detail"]
+
+
+def test_subprocess_etl_runner_fails_fast_without_pyspark(tmp_path, monkeypatch):
+    from src.main import SubprocessETLJobRunner, _save_upload
+
+    saved_path = _save_upload(
+        str(tmp_path / "catalog.csv"), "catalog.csv", b"product_id\nP01\n"
+    )
+    manifest_path = str(tmp_path / "catalog.csv.manifest.json")
+    monkeypatch.setattr("src.main.importlib.util.find_spec", lambda name: None)
+    config = APIConfig(environment="test", etl_output_dir=str(tmp_path / "out"))
+
+    result = SubprocessETLJobRunner().run(saved_path, manifest_path, config)
+
+    assert result["status"] == "failed"
+    assert "pyspark is not installed" in result["error"]
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    assert manifest["status"] == "etl_failed"

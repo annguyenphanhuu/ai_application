@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, Protocol, Sequence
 
-
 DEFAULT_REDIS_HOST = "localhost"
 DEFAULT_REDIS_PORT = 6379
 DEFAULT_KEY_PREFIX = "smartshop"
@@ -21,6 +20,15 @@ DEFAULT_SESSION_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_RATE_LIMIT = 60
 DEFAULT_RATE_WINDOW_SECONDS = 60
 DEFAULT_RATE_LIMIT_ALGORITHM = "token_bucket"
+DEV_ENVIRONMENTS = {"dev", "local", "test"}
+
+
+def _memory_fallback_default() -> bool:
+    override = os.getenv("SMARTSHOP_REDIS_ALLOW_MEMORY_FALLBACK")
+    if override is not None:
+        return override.strip().lower() in {"1", "true", "yes", "on"}
+    environment = (os.getenv("SMARTSHOP_ENV") or os.getenv("APP_ENV") or "dev").strip()
+    return environment.lower() in DEV_ENVIRONMENTS
 
 
 class RedisClient(Protocol):
@@ -69,6 +77,8 @@ class RedisConfig:
     host: str = DEFAULT_REDIS_HOST
     port: int = DEFAULT_REDIS_PORT
     db: int = 0
+    password: str | None = None
+    allow_memory_fallback: bool = True
     key_prefix: str = DEFAULT_KEY_PREFIX
     search_ttl_seconds: int = DEFAULT_SEARCH_TTL_SECONDS
     session_ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS
@@ -94,6 +104,11 @@ class RedisConfig:
                 )
             ),
             db=int(os.getenv("REDIS_DB", os.getenv("SMARTSHOP_REDIS_DB", "0"))),
+            password=os.getenv(
+                "REDIS_PASSWORD", os.getenv("SMARTSHOP_REDIS_PASSWORD", "")
+            )
+            or None,
+            allow_memory_fallback=_memory_fallback_default(),
             key_prefix=key_prefix,
             search_ttl_seconds=int(
                 os.getenv(
@@ -395,6 +410,7 @@ return {allowed, math.floor(tokens), reset_after}
             host=config.host,
             port=config.port,
             db=config.db,
+            password=config.password,
             decode_responses=True,
             socket_timeout=2.0,
             socket_connect_timeout=2.0,
@@ -403,6 +419,14 @@ return {allowed, math.floor(tokens), reset_after}
             client.ping()
             return client
         except Exception as exc:
+            if not config.allow_memory_fallback:
+                raise RuntimeError(
+                    f"Cannot connect to Redis at {config.host}:{config.port} "
+                    f"({exc}). In-memory fallback is disabled outside "
+                    "dev/local/test environments; fix Redis connectivity or set "
+                    "SMARTSHOP_REDIS_ALLOW_MEMORY_FALLBACK=true for demos."
+                ) from exc
+
             import logging
 
             logging.getLogger(__name__).warning(

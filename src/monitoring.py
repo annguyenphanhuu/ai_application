@@ -226,13 +226,32 @@ def instrument_app(app: Any, config: PrometheusConfig | None = None) -> Any:
         config = PrometheusConfig()
 
     try:
+        from prometheus_client import (  # type: ignore
+            CONTENT_TYPE_LATEST,
+            REGISTRY,
+            generate_latest,
+        )
         from prometheus_fastapi_instrumentator import Instrumentator  # type: ignore
+        from starlette.responses import Response  # type: ignore
 
         Instrumentator(
             should_group_status_codes=config.should_group_status_codes,
             should_group_untemplated=config.should_group_untemplated,
             excluded_handlers=config.excluded_handlers,
-        ).instrument(app).expose(app, endpoint=config.metrics_endpoint)
+        ).instrument(app)
+
+        # Expose the endpoint ourselves so the output combines the default
+        # registry (HTTP metrics from the instrumentator) with the private
+        # registry holding the smartshop_* business metrics. The stock
+        # ``.expose()`` helper only serves the default registry, which left
+        # the business panels in Grafana without data.
+        @app.get(config.metrics_endpoint, include_in_schema=False)
+        async def metrics() -> Response:
+            output = generate_latest(REGISTRY)
+            custom_registry = _get_or_create_registry()
+            if custom_registry is not None:
+                output += generate_latest(custom_registry)
+            return Response(content=output, media_type=CONTENT_TYPE_LATEST)
 
         logger.info(
             "Prometheus instrumentator attached; metrics at %s",
@@ -384,6 +403,46 @@ class LangfuseTracer:
 
         return decorator
 
+    def log_generation(
+        self,
+        *,
+        name: str,
+        model: str | None = None,
+        latency_seconds: float = 0.0,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        input_text: str | None = None,
+        output_text: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Send one LLM generation event to Langfuse.
+
+        Returns True when the event was handed to the SDK, False when tracing
+        is disabled or the SDK call failed (the API keeps running either way).
+        """
+        if not self.is_enabled:
+            return False
+        try:
+            self._client.generation(
+                name=name,
+                model=model,
+                input=input_text,
+                output=output_text,
+                session_id=session_id,
+                user_id=user_id,
+                usage={"input": prompt_tokens, "output": completion_tokens},
+                metadata={
+                    "latency_seconds": latency_seconds,
+                    **(metadata or {}),
+                },
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Langfuse generation logging failed: %s", exc)
+            return False
+
     def flush(self) -> None:
         """Flush pending Langfuse events (call on app shutdown)."""
         if self._client is not None:
@@ -454,6 +513,39 @@ class MonitoringService:
         """Record how long an LLM call took."""
         if "llm_latency_seconds" in self._metrics:
             self._metrics["llm_latency_seconds"].observe(latency_seconds)
+
+    def record_llm_call(
+        self,
+        *,
+        name: str = "agent-llm-routing",
+        model: str | None = None,
+        latency_seconds: float = 0.0,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        input_text: str | None = None,
+        output_text: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Record one real LLM call in both Prometheus and Langfuse."""
+        self.record_llm_latency(latency_seconds)
+        self.record_llm_tokens(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+        self.langfuse.log_generation(
+            name=name,
+            model=model,
+            latency_seconds=latency_seconds,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            session_id=session_id,
+            user_id=user_id,
+            input_text=input_text,
+            output_text=output_text,
+            metadata=metadata,
+        )
 
     def record_agent_decision(self, action: str) -> None:
         """Record one agent routing decision."""

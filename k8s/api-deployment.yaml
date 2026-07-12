@@ -26,6 +26,12 @@ spec:
               value: redis
             - name: REDIS_PORT
               value: "6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: smartshop-api-secret
+                  key: redis-password
+                  optional: true
             - name: SMARTSHOP_ENV
               value: prod
             - name: QDRANT_HOST

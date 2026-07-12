@@ -1,10 +1,11 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: qdrant
   labels:
     app: qdrant
 spec:
+  serviceName: qdrant
   replicas: 1
   selector:
     matchLabels:
@@ -22,6 +23,9 @@ spec:
               containerPort: 6333
             - name: grpc
               containerPort: 6334
+          volumeMounts:
+            - name: qdrant-storage
+              mountPath: /qdrant/storage
           readinessProbe:
             httpGet:
               path: /readyz
@@ -41,6 +45,14 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: qdrant-storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
 ---
 apiVersion: v1
 kind: Service

@@ -18,7 +18,6 @@ import time
 import types
 from unittest.mock import MagicMock, patch
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -276,8 +275,9 @@ class TestInstrumentApp:
         # Must return the same app object
         assert result is fake_app
 
-    def test_instrument_calls_expose(self):
-        """When the package IS installed (or mocked), expose() should be called."""
+    def test_instrument_registers_combined_metrics_endpoint(self):
+        """When the package IS installed (or mocked), the app is instrumented
+        and a /metrics route serving both registries is registered."""
         from src.monitoring import PrometheusConfig, instrument_app
 
         fake_app = MagicMock()
@@ -285,7 +285,6 @@ class TestInstrumentApp:
         # Build a mock instrumentator chain
         mock_inst = MagicMock()
         mock_inst.instrument.return_value = mock_inst
-        mock_inst.expose.return_value = mock_inst
         MockClass = MagicMock(return_value=mock_inst)
 
         fake_module = types.ModuleType("prometheus_fastapi_instrumentator")
@@ -297,7 +296,8 @@ class TestInstrumentApp:
             instrument_app(fake_app, PrometheusConfig())
 
         mock_inst.instrument.assert_called_once_with(fake_app)
-        mock_inst.expose.assert_called_once()
+        # The combined /metrics endpoint is registered directly on the app.
+        fake_app.get.assert_called_once_with("/metrics", include_in_schema=False)
 
 
 # ---------------------------------------------------------------------------
@@ -418,3 +418,71 @@ class TestMainAppMonitoring:
             created = create_app(monitoring=fake_monitoring)
 
         assert created.state.monitoring is fake_monitoring
+
+
+# ---------------------------------------------------------------------------
+# record_llm_call: Prometheus + Langfuse in one call
+# ---------------------------------------------------------------------------
+
+
+class TestRecordLLMCall:
+    def test_record_llm_call_records_metrics_and_langfuse(self):
+        from src.monitoring import MonitoringService
+
+        service = MonitoringService()
+        service.langfuse = MagicMock()
+        service.record_llm_latency = MagicMock()
+        service.record_llm_tokens = MagicMock()
+
+        service.record_llm_call(
+            name="agent-llm-routing",
+            model="o4-mini",
+            latency_seconds=1.5,
+            prompt_tokens=42,
+            completion_tokens=7,
+            session_id="S01",
+        )
+
+        service.record_llm_latency.assert_called_once_with(1.5)
+        service.record_llm_tokens.assert_called_once_with(
+            prompt_tokens=42, completion_tokens=7
+        )
+        service.langfuse.log_generation.assert_called_once()
+        kwargs = service.langfuse.log_generation.call_args.kwargs
+        assert kwargs["model"] == "o4-mini"
+        assert kwargs["prompt_tokens"] == 42
+        assert kwargs["session_id"] == "S01"
+
+    def test_log_generation_returns_false_when_disabled(self):
+        from src.monitoring import LangfuseTracer
+
+        tracer = LangfuseTracer()
+
+        assert tracer.is_enabled is False
+        assert tracer.log_generation(name="test", model="o4-mini") is False
+
+
+class TestMetricsEndpointExposesCustomRegistry:
+    def test_metrics_output_includes_smartshop_business_metrics(self):
+        import pytest
+
+        pytest.importorskip("prometheus_client")
+        pytest.importorskip("prometheus_fastapi_instrumentator")
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from src.monitoring import MonitoringService, instrument_app
+
+        service = MonitoringService()
+        service.record_search(source="cache", latency_seconds=0.01)
+        service.record_click_event(status="published", latency_seconds=0.005)
+
+        app = FastAPI()
+        instrument_app(app)
+        client = TestClient(app)
+
+        response = client.get("/metrics")
+
+        assert response.status_code == 200
+        assert "smartshop_search_requests_total" in response.text
+        assert "smartshop_click_events_total" in response.text

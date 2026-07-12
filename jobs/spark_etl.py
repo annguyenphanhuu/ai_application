@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-
 DEFAULT_PRODUCTS_INPUT = "data/raw/amazon_reviews_2023/combined/meta.jsonl"
 DEFAULT_REVIEWS_INPUT = "data/raw/amazon_reviews_2023/combined/reviews.jsonl"
 DEFAULT_PRODUCTS_OUTPUT = "data/processed/amazon_reviews_2023_flow_smoke"

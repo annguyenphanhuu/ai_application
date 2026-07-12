@@ -15,7 +15,6 @@ from typing import Any, Protocol, Sequence
 
 import pandas as pd
 
-
 DEFAULT_COLLECTION_NAME = "products"
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_VECTOR_SIZE = 384
@@ -24,6 +23,15 @@ DEFAULT_QDRANT_PORT = 6333
 DEFAULT_INPUT_PATH = "data/processed/amazon_reviews_2023_flow_smoke"
 DEFAULT_EMBEDDING_BACKEND = "sentence-transformers"
 TEXT_COLUMNS = ("title", "description", "brand", "category")
+DEV_ENVIRONMENTS = {"dev", "local", "test"}
+
+
+def _memory_fallback_default() -> bool:
+    override = os.getenv("SMARTSHOP_QDRANT_ALLOW_MEMORY_FALLBACK")
+    if override is not None:
+        return override.strip().lower() in {"1", "true", "yes", "on"}
+    environment = (os.getenv("SMARTSHOP_ENV") or "dev").strip().lower()
+    return environment in DEV_ENVIRONMENTS
 
 
 class EmbeddingModel(Protocol):
@@ -77,6 +85,7 @@ class VectorStoreConfig:
     vector_size: int = DEFAULT_VECTOR_SIZE
     qdrant_host: str = DEFAULT_QDRANT_HOST
     qdrant_port: int = DEFAULT_QDRANT_PORT
+    allow_memory_fallback: bool = True
 
     @classmethod
     def from_env(cls) -> "VectorStoreConfig":
@@ -103,6 +112,7 @@ class VectorStoreConfig:
                     os.getenv("SMARTSHOP_QDRANT_PORT", str(DEFAULT_QDRANT_PORT)),
                 )
             ),
+            allow_memory_fallback=_memory_fallback_default(),
         )
 
 
@@ -227,7 +237,10 @@ def build_encoder(config: VectorStoreConfig) -> EmbeddingModel:
 
 class QdrantVectorBackend:
     def __init__(
-        self, host: str = DEFAULT_QDRANT_HOST, port: int = DEFAULT_QDRANT_PORT
+        self,
+        host: str = DEFAULT_QDRANT_HOST,
+        port: int = DEFAULT_QDRANT_PORT,
+        allow_memory_fallback: bool = True,
     ):
         try:
             from qdrant_client import QdrantClient
@@ -237,14 +250,24 @@ class QdrantVectorBackend:
                 "Install it with `pip install -r requirements.txt` or update the Conda env."
             ) from exc
 
+        self.using_memory_fallback = False
         if host == ":memory:":
             self.client = QdrantClient(location=":memory:")
+            self.using_memory_fallback = True
         else:
             try:
                 client = QdrantClient(host=host, port=port, timeout=2.0)
                 client.get_collections()
                 self.client = client
             except Exception as exc:
+                if not allow_memory_fallback:
+                    raise RuntimeError(
+                        f"Cannot connect to Qdrant at {host}:{port} ({exc}). "
+                        "In-memory fallback is disabled outside dev/local/test "
+                        "environments; fix Qdrant connectivity or set "
+                        "SMARTSHOP_QDRANT_ALLOW_MEMORY_FALLBACK=true for demos."
+                    ) from exc
+
                 import logging
 
                 logging.getLogger(__name__).warning(
@@ -252,6 +275,14 @@ class QdrantVectorBackend:
                     "Falling back to local in-memory Qdrant client (:memory:)."
                 )
                 self.client = QdrantClient(location=":memory:")
+                self.using_memory_fallback = True
+
+    def ping(self) -> bool:
+        try:
+            self.client.get_collections()
+            return True
+        except Exception:  # noqa: BLE001
+            return False
 
     def init_collection(self, collection_name: str, vector_size: int) -> None:
         from qdrant_client.models import Distance, VectorParams
@@ -347,8 +378,16 @@ class VectorSearchService:
         self.config = config or VectorStoreConfig.from_env()
         self.encoder = encoder or build_encoder(self.config)
         self.backend = backend or QdrantVectorBackend(
-            host=self.config.qdrant_host, port=self.config.qdrant_port
+            host=self.config.qdrant_host,
+            port=self.config.qdrant_port,
+            allow_memory_fallback=self.config.allow_memory_fallback,
         )
+
+    def ping(self) -> bool:
+        backend_ping = getattr(self.backend, "ping", None)
+        if backend_ping is None:
+            return True
+        return bool(backend_ping())
 
     def init_collection(self) -> None:
         self.backend.init_collection(

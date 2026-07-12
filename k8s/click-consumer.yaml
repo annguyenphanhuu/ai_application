@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smartshop-click-consumer
+  labels:
+    app: smartshop-click-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: smartshop-click-consumer
+  template:
+    metadata:
+      labels:
+        app: smartshop-click-consumer
+    spec:
+      containers:
+        - name: click-consumer
+          image: smartshop-api:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "src.streaming", "consume"]
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: kafka:9092
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: KAFKA_GROUP_ID
+              value: smartshop-click-consumer
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi

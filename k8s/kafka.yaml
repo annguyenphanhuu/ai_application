@@ -1,10 +1,11 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: kafka
   labels:
     app: kafka
 spec:
+  serviceName: kafka
   replicas: 1
   selector:
     matchLabels:
@@ -14,6 +15,9 @@ spec:
       labels:
         app: kafka
     spec:
+      # apache/kafka runs as uid 1000; fsGroup lets it write to the PVC.
+      securityContext:
+        fsGroup: 1000
       containers:
         - name: kafka
           image: apache/kafka:3.7.2
@@ -39,6 +43,8 @@ spec:
               value: CONTROLLER
             - name: KAFKA_INTER_BROKER_LISTENER_NAME
               value: PLAINTEXT
+            - name: KAFKA_LOG_DIRS
+              value: /var/lib/kafka/data
             - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
               value: "1"
             - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
@@ -49,6 +55,9 @@ spec:
               value: "0"
             - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
               value: "true"
+          volumeMounts:
+            - name: kafka-data
+              mountPath: /var/lib/kafka/data
           readinessProbe:
             tcpSocket:
               port: broker
@@ -66,6 +75,14 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: kafka-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
 ---
 apiVersion: v1
 kind: Service

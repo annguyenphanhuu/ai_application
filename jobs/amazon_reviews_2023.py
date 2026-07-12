@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-
 DEFAULT_DATASET_NAME = "McAuley-Lab/Amazon-Reviews-2023"
 DEFAULT_CATEGORY = "All_Beauty"
 DEFAULT_CATEGORY_SPEC = "all"

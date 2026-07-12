@@ -7,7 +7,6 @@ import pytest
 from src.cache_service import RedisConfig, RedisService
 from src.vector_store import VectorSearchService, VectorStoreConfig
 
-
 pytestmark = pytest.mark.integration
 
 

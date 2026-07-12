@@ -1,10 +1,11 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: redis
   labels:
     app: redis
 spec:
+  serviceName: redis
   replicas: 1
   selector:
     matchLabels:
@@ -17,9 +18,30 @@ spec:
       containers:
         - name: redis
           image: redis:7-alpine
+          # AOF persistence so sessions/approvals survive pod restarts.
+          # --requirepass is appended via args when the secret is present.
+          command:
+            - sh
+            - -c
+            - >
+              if [ -n "$REDIS_PASSWORD" ]; then
+                exec redis-server --appendonly yes --requirepass "$REDIS_PASSWORD";
+              else
+                exec redis-server --appendonly yes;
+              fi
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: smartshop-api-secret
+                  key: redis-password
+                  optional: true
           ports:
             - name: redis
               containerPort: 6379
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
           readinessProbe:
             tcpSocket:
               port: redis
@@ -37,6 +59,14 @@ spec:
             limits:
               cpu: 250m
               memory: 256Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
 ---
 apiVersion: v1
 kind: Service

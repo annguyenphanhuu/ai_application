@@ -16,7 +16,6 @@ from src.streaming import (
     build_parser,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
@@ -295,3 +294,47 @@ def test_build_parser_produce():
     assert args.command == "produce"
     assert args.user_id == "U01"
     assert args.dead_letter_topic == "user-clicks-dlq"
+
+
+def test_record_click_serializes_nested_values_for_redis_hash():
+    from src.streaming import RedisHotProductsStore
+
+    class RecordingPipeline:
+        def __init__(self):
+            self.hset_mappings = []
+
+        def zincrby(self, key, amount, member):
+            return self
+
+        def hset(self, name, mapping):
+            self.hset_mappings.append(mapping)
+            return self
+
+        def execute(self):
+            return [1.0, 1]
+
+    class RecordingClient:
+        def __init__(self):
+            self.pipe = RecordingPipeline()
+
+        def pipeline(self):
+            return self.pipe
+
+    client = RecordingClient()
+    store = RedisHotProductsStore(client=client)
+
+    score = store.record_click(
+        "P01",
+        {
+            "user_id": "U01",
+            "product_id": "P01",
+            "metadata": {"page": "search"},
+            "session_id": None,
+        },
+    )
+
+    assert score == 1.0
+    mapping = client.pipe.hset_mappings[0]
+    for value in mapping.values():
+        assert isinstance(value, (str, int, float, bytes))
+    assert mapping["metadata"] == '{"page": "search"}'

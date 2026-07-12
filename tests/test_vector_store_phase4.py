@@ -211,3 +211,49 @@ def test_vector_store_config_can_be_loaded_from_env(monkeypatch):
     assert config.collection_name == "catalog"
     assert config.embedding_backend == "hashing"
     assert config.vector_size == 768
+
+
+def test_memory_fallback_enabled_in_dev_environment(monkeypatch):
+    monkeypatch.delenv("SMARTSHOP_QDRANT_ALLOW_MEMORY_FALLBACK", raising=False)
+    monkeypatch.setenv("SMARTSHOP_ENV", "dev")
+
+    assert VectorStoreConfig.from_env().allow_memory_fallback is True
+
+
+def test_memory_fallback_disabled_in_prod_environment(monkeypatch):
+    monkeypatch.delenv("SMARTSHOP_QDRANT_ALLOW_MEMORY_FALLBACK", raising=False)
+    monkeypatch.setenv("SMARTSHOP_ENV", "prod")
+
+    assert VectorStoreConfig.from_env().allow_memory_fallback is False
+
+
+def test_memory_fallback_env_override_wins(monkeypatch):
+    monkeypatch.setenv("SMARTSHOP_ENV", "prod")
+    monkeypatch.setenv("SMARTSHOP_QDRANT_ALLOW_MEMORY_FALLBACK", "true")
+
+    assert VectorStoreConfig.from_env().allow_memory_fallback is True
+
+
+def test_qdrant_backend_raises_without_fallback_when_unreachable():
+    from src.vector_store import QdrantVectorBackend
+
+    with pytest.raises(RuntimeError, match="In-memory fallback is disabled"):
+        QdrantVectorBackend(
+            host="qdrant-does-not-exist.invalid",
+            port=6333,
+            allow_memory_fallback=False,
+        )
+
+
+def test_service_ping_delegates_to_backend():
+    class PingBackend(FakeBackend):
+        def ping(self):
+            return True
+
+    service = VectorSearchService(
+        config=VectorStoreConfig(collection_name="test-products", vector_size=3),
+        encoder=FakeEncoder(),
+        backend=PingBackend(),
+    )
+
+    assert service.ping() is True

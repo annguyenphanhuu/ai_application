@@ -156,6 +156,8 @@ class AgentDecision:
     policy_topic: str | None = None
     tool_args: dict[str, Any] = field(default_factory=dict)
     llm_model: str | None = None
+    llm_latency_seconds: float = 0.0
+    llm_usage: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -510,6 +512,22 @@ class SmartShopAgent:
                 args = {}
         return name, dict(args)
 
+    @staticmethod
+    def _extract_llm_usage(ai_message: Any) -> dict[str, int]:
+        """Read token usage from a LangChain AIMessage, tolerating SDK variants."""
+        usage = getattr(ai_message, "usage_metadata", None) or {}
+        prompt_tokens = usage.get("input_tokens")
+        completion_tokens = usage.get("output_tokens")
+        if prompt_tokens is None and completion_tokens is None:
+            response_metadata = getattr(ai_message, "response_metadata", None) or {}
+            token_usage = response_metadata.get("token_usage") or {}
+            prompt_tokens = token_usage.get("prompt_tokens")
+            completion_tokens = token_usage.get("completion_tokens")
+        return {
+            "prompt_tokens": int(prompt_tokens or 0),
+            "completion_tokens": int(completion_tokens or 0),
+        }
+
     def _llm_decide(
         self,
         message: str,
@@ -531,6 +549,7 @@ class SmartShopAgent:
             raise
 
         elapsed = time.perf_counter() - start
+        usage = self._extract_llm_usage(ai_message)
         tool_name, args = self._first_tool_call(ai_message)
         logger.info(
             "agent_llm_decision",
@@ -541,49 +560,51 @@ class SmartShopAgent:
             },
         )
 
-        if tool_name == "request_human_review" and not approved_by_human:
+        def decision(**kwargs: Any) -> AgentDecision:
             return AgentDecision(
+                llm_model=self.config.llm_model,
+                llm_latency_seconds=elapsed,
+                llm_usage=usage,
+                **kwargs,
+            )
+
+        if tool_name == "request_human_review" and not approved_by_human:
+            return decision(
                 action="request_human_review",
                 reason=str(args.get("reason") or "LLM requested human review."),
                 tool_args=args,
-                llm_model=self.config.llm_model,
             )
         if tool_name == "search_products":
             if self.config.require_human_approval_for_tools and not approved_by_human:
-                return AgentDecision(
+                return decision(
                     action="request_human_review",
                     reason="Tool execution requires human approval.",
                     tool_args=args,
-                    llm_model=self.config.llm_model,
                 )
-            return AgentDecision(
+            return decision(
                 action="search_products",
                 reason="LLM selected search_products tool.",
                 tool_args=args,
-                llm_model=self.config.llm_model,
             )
         if tool_name == "retrieve_policy":
             topic = str(args.get("topic") or "").strip().lower().replace(" ", "-")
             if not topic:
                 matches = self.policy_source.search(str(args.get("query") or message))
                 topic = matches[0].topic if matches else None
-            return AgentDecision(
+            return decision(
                 action="answer_policy",
                 reason="LLM selected retrieve_policy tool.",
                 policy_topic=topic,
                 tool_args=args,
-                llm_model=self.config.llm_model,
             )
         if approved_by_human:
-            return AgentDecision(
+            return decision(
                 action="handoff_to_human",
                 reason="Human approval is present for a complex request.",
-                llm_model=self.config.llm_model,
             )
-        return AgentDecision(
+        return decision(
             action="fallback",
             reason="LLM did not select a supported tool.",
-            llm_model=self.config.llm_model,
         )
 
     def decide(self, message: str, approved_by_human: bool = False) -> AgentDecision:
@@ -655,6 +676,22 @@ class SmartShopAgent:
             history=history,
             approved_by_human=approved_by_human,
         )
+        if decision.llm_model:
+            trace_events.append(
+                AgentTraceEvent(
+                    event="llm_call",
+                    action=decision.action,
+                    latency_seconds=decision.llm_latency_seconds,
+                    metadata={
+                        "model": decision.llm_model,
+                        "prompt_tokens": decision.llm_usage.get("prompt_tokens", 0),
+                        "completion_tokens": decision.llm_usage.get(
+                            "completion_tokens", 0
+                        ),
+                        "input_text": message,
+                    },
+                )
+            )
         trace_events.append(
             AgentTraceEvent(
                 event="decision",

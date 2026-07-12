@@ -5,7 +5,9 @@ metadata:
   labels:
     app: smartshop-api
 spec:
-  type: LoadBalancer
+  # Fronted by the Ingress (k8s/ingress.yaml); switch back to LoadBalancer if
+  # you expose the API without an ingress controller.
+  type: ClusterIP
   selector:
     app: smartshop-api
   ports:

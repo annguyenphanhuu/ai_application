@@ -1040,6 +1040,37 @@ python -m pytest tests/test_monitoring_phase10.py -v
 
 ---
 
+## 🔒 Production Hardening (P0/P1/P2 Đã Triển Khai)
+
+Các thay đổi nâng dự án từ demo local lên gần production-ready:
+
+**Độ tin cậy (P0):**
+
+* Qdrant/Redis **không còn âm thầm fallback sang in-memory** ngoài môi trường `dev/local/test`. Trên prod, mất kết nối sẽ trả lỗi rõ ràng thay vì phục vụ dữ liệu rỗng. Override demo bằng `SMARTSHOP_QDRANT_ALLOW_MEMORY_FALLBACK` / `SMARTSHOP_REDIS_ALLOW_MEMORY_FALLBACK`.
+* `/health/ready` kiểm tra cả Qdrant khi `SMARTSHOP_READINESS_CHECK_QDRANT=true` (bật sẵn trong Compose; mặc định bật ngoài dev).
+* K8s: Redis/Qdrant/Kafka chuyển sang **StatefulSet + PVC**; Redis bật AOF (`--appendonly yes`) nên session/approvals sống qua pod restart.
+* Upload ETL: runtime image không có Spark sẽ **fail nhanh với thông báo rõ ràng** trong manifest thay vì chạy lệnh chắc chắn lỗi; theo dõi trạng thái qua `GET /catalog/uploads` và `GET /catalog/uploads/{upload_name}`.
+* Image `runtime` đã bỏ Java (nhẹ hơn ~200MB); Java chỉ còn trong `full-runtime`. Default `SMARTSHOP_ENV` trong image là `prod` (fail-safe); Compose override về `dev`.
+
+**Tính năng nối liền kiến trúc (P1):**
+
+* LLM routing calls giờ được ghi vào **Prometheus (`smartshop_llm_*`) và Langfuse** (`MonitoringService.record_llm_call`), gồm latency + prompt/completion tokens — panel Grafana LLM có data thật.
+* **Click consumer đã được deploy**: service `click-consumer` trong Compose và `k8s/click-consumer.yaml`, cập nhật bảng hot-products trong Redis từ topic `user-clicks`.
+* **MLflow champion model được serve** qua `POST /predict/rating` (cần `SMARTSHOP_MLFLOW_TRACKING_URI` + mlflow trong runtime, ví dụ image `full-runtime`); trả 503 kèm hướng dẫn khi chưa cấu hình.
+* Mọi call chặn (LLM, Redis, Qdrant, Kafka) chạy qua threadpool (`asyncio.to_thread`) — event loop không còn bị khoá bởi một request chậm.
+* **RBAC cho approvals**: cần scope `approvals:read` / `approvals:write` (hoặc `admin`). Mint token reviewer local: `create_access_token("reviewer", scopes=["approvals:read", "approvals:write"])`.
+
+**Vận hành (P2):**
+
+* CI đẩy image lên **GHCR** với tag `sha-<commit>` + `latest` khi merge vào `main` (job `publish-image`); production nên pin tag sha.
+* `k8s/ingress.yaml`: Ingress NGINX + cert-manager TLS (đổi host/issuer theo cluster); Service API chuyển sang ClusterIP.
+* `monitoring/alert_rules.yml`: alert cho target down, 5xx > 5%, P95 > 2s, cache hit thấp, LLM chậm.
+* Redis hỗ trợ password qua `REDIS_PASSWORD` (Secret `smartshop-api-secret/redis-password` trong K8s).
+* Structured logging: JSON logs ngoài dev (`SMARTSHOP_JSON_LOGS`), request-ID tự sinh/lan truyền qua header `X-Request-ID`.
+* Dev tools pin version trong `requirements-dev.txt` để CI không vỡ khi black đổi style.
+
+---
+
 ## 📈 Tóm Tắt Quy Trình Tổng Thể Lắp Ráp Cục Bộ (Local Deployment)
 
 Để chạy thử toàn bộ mô hình này trên máy của bạn (Local Development) mà không cần setup mây phức tạp:

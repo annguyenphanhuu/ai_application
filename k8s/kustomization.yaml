@@ -7,3 +7,5 @@ resources:
   - api-deployment.yaml
   - api-service.yaml
   - api-hpa.yaml
+  - click-consumer.yaml
+  - ingress.yaml

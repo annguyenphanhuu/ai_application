@@ -1,0 +1,63 @@
+groups:
+  - name: smartshop-api
+    rules:
+      - alert: ApiTargetDown
+        expr: up{job="smartshop-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SmartShop API target is down"
+          description: "Prometheus cannot scrape the API /metrics endpoint for 1 minute."
+
+      - alert: HighErrorRate
+        expr: >
+          sum(rate(http_requests_total{job="smartshop-api", status=~"5.."}[5m]))
+          /
+          sum(rate(http_requests_total{job="smartshop-api"}[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SmartShop API 5xx error rate above 5%"
+          description: "More than 5% of requests returned 5xx over the last 5 minutes."
+
+      - alert: HighP95Latency
+        expr: >
+          histogram_quantile(
+            0.95,
+            sum(rate(http_request_duration_seconds_bucket{job="smartshop-api"}[5m])) by (le)
+          ) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SmartShop API P95 latency above 2s"
+          description: "The 95th percentile request latency exceeded 2 seconds for 10 minutes."
+
+      - alert: SearchCacheHitRateLow
+        expr: >
+          sum(rate(smartshop_search_requests_total{source="cache"}[15m]))
+          /
+          sum(rate(smartshop_search_requests_total[15m]))
+          < 0.1
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "Search cache hit rate below 10%"
+          description: "Redis search cache is barely used; check cache TTL and key hashing."
+
+      - alert: LLMLatencyHigh
+        expr: >
+          histogram_quantile(
+            0.95,
+            sum(rate(smartshop_llm_latency_seconds_bucket[10m])) by (le)
+          ) > 15
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent LLM routing P95 latency above 15s"
+          description: "LLM tool-routing calls are slow; check the OpenAI endpoint or model choice."

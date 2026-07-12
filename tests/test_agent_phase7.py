@@ -56,6 +56,7 @@ class FakeToolCallingLLM:
         self.messages = messages
         return SimpleNamespace(
             tool_calls=[{"name": self.tool_name, "args": self.args}],
+            usage_metadata={"input_tokens": 42, "output_tokens": 7},
             response_metadata={"token_usage": {"prompt_tokens": 10}},
         )
 
@@ -119,6 +120,34 @@ def test_agent_uses_llm_tool_call_for_non_keyword_product_request():
     assert service.queries[0]["query"] == "ergonomic desk setup"
     assert service.queries[0]["top_k"] == 1
     assert llm.bound_tools is not None
+
+
+def test_agent_emits_llm_call_trace_event_with_token_usage():
+    llm = FakeToolCallingLLM(
+        "search_products",
+        {"query": "ergonomic desk setup", "top_k": 1},
+    )
+    agent = SmartShopAgent(
+        config=AgentConfig(top_k=2, use_llm_routing="always"),
+        search_tool=ProductSearchTool(FakeSearchService()),
+        llm=llm,
+    )
+
+    response = agent.handle_message("Can you compare comfort options for my desk?")
+
+    llm_events = [event for event in response.trace_events if event.event == "llm_call"]
+    assert len(llm_events) == 1
+    assert llm_events[0].metadata["prompt_tokens"] == 42
+    assert llm_events[0].metadata["completion_tokens"] == 7
+    assert llm_events[0].metadata["model"]
+
+
+def test_rule_based_agent_does_not_emit_llm_call_event():
+    agent, _service = build_agent()
+
+    response = agent.handle_message("what is your shipping policy?")
+
+    assert all(event.event != "llm_call" for event in response.trace_events)
 
 
 def test_agent_retrieves_policy_from_source_file(tmp_path):

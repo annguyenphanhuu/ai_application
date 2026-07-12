@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -108,7 +107,30 @@ def test_kubernetes_manifests_define_api_service_and_hpa():
     assert "name: SMARTSHOP_ENV" in deployment
     assert "name: QDRANT_HOST" in deployment
     assert "kind: Service" in service
-    assert "type: LoadBalancer" in service
+    assert "type: ClusterIP" in service
     assert "kind: HorizontalPodAutoscaler" in hpa
     assert "maxReplicas: 6" in hpa
     assert "kafka.yaml" in kustomization
+    assert "click-consumer.yaml" in kustomization
+    assert "ingress.yaml" in kustomization
+
+
+def test_kubernetes_stateful_services_have_persistence():
+    redis = read("k8s/redis.yaml")
+    qdrant = read("k8s/qdrant.yaml")
+    kafka = read("k8s/kafka.yaml")
+
+    for manifest in (redis, qdrant, kafka):
+        assert "kind: StatefulSet" in manifest
+        assert "volumeClaimTemplates:" in manifest
+    assert "--appendonly yes" in redis or "appendonly yes" in redis
+
+
+def test_compose_and_k8s_run_click_consumer():
+    compose = read("docker-compose.yml")
+    consumer = read("k8s/click-consumer.yaml")
+
+    assert "click-consumer:" in compose
+    assert '"consume"' in compose or "src.streaming" in compose
+    assert "src.streaming" in consumer
+    assert "KAFKA_BOOTSTRAP_SERVERS" in consumer

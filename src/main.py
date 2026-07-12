@@ -12,6 +12,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import importlib.util
 import json
 import os
 import re
@@ -47,10 +48,11 @@ from src.cache_service import (
     RedisConfig,
     RedisService,
 )
+from src.logging_config import configure_logging, request_id_var
+from src.model_service import RatingModelService
 from src.monitoring import MonitoringService
 from src.streaming import KafkaClickEventProducer, StreamingConfig
 from src.vector_store import ProductSearchFilters, VectorSearchService
-
 
 DEFAULT_API_TITLE = "SmartShop AI API Layer"
 DEFAULT_UPLOAD_DIR = "data/uploads/catalog"
@@ -205,13 +207,15 @@ class APIConfig:
     access_token_expire_minutes: int = 60
     chat_history_limit: int = 20
     chat_chunk_delay_seconds: float = 0.0
+    readiness_check_qdrant: bool = False
 
     @classmethod
     def from_env(cls) -> "APIConfig":
         cors_origins = _split_env_list(os.getenv("SMARTSHOP_CORS_ORIGINS"))
         jwt_algorithms = _split_env_list(os.getenv("SMARTSHOP_JWT_ALGORITHMS"))
+        environment = os.getenv("SMARTSHOP_ENV", "dev")
         return cls(
-            environment=os.getenv("SMARTSHOP_ENV", "dev"),
+            environment=environment,
             upload_dir=os.getenv("SMARTSHOP_UPLOAD_DIR", DEFAULT_UPLOAD_DIR),
             etl_output_dir=os.getenv(
                 "SMARTSHOP_ETL_OUTPUT_DIR", DEFAULT_ETL_OUTPUT_DIR
@@ -232,6 +236,10 @@ class APIConfig:
             ),
             access_token_expire_minutes=int(
                 os.getenv("SMARTSHOP_TOKEN_EXPIRE_MINUTES", "60")
+            ),
+            readiness_check_qdrant=_env_bool(
+                "SMARTSHOP_READINESS_CHECK_QDRANT",
+                environment.strip().lower() not in {"dev", "local", "test"},
             ),
         )
 
@@ -538,12 +546,32 @@ class SubprocessETLJobRunner:
             "output_format": config.etl_output_format,
             "manifest_path": manifest_path,
         }
+        started_at = datetime.now(timezone.utc).isoformat()
+
+        if not config.etl_command and importlib.util.find_spec("pyspark") is None:
+            result = {
+                "status": "failed",
+                "command": None,
+                "returncode": None,
+                "output_path": output_path,
+                "started_at": started_at,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "error": (
+                    "pyspark is not installed in this runtime, so the default "
+                    "ETL command cannot run. Set SMARTSHOP_ETL_COMMAND to a "
+                    "worker/queue command, or deploy the API with the "
+                    "full-runtime image target that bundles Spark."
+                ),
+            }
+            manifest.update({"status": "etl_failed", "etl": result})
+            _write_upload_manifest(manifest_file, manifest)
+            return result
+
         command = (
             _format_etl_command(config.etl_command, values)
             if config.etl_command
             else _default_etl_command(input_path, output_path, config)
         )
-        started_at = datetime.now(timezone.utc).isoformat()
 
         try:
             completed = subprocess.run(
@@ -635,9 +663,11 @@ def create_app(
     monitoring: MonitoringService | None = None,
     kafka_producer: KafkaClickEventProducer | None = None,
     etl_runner: ETLJobRunner | None = None,
+    rating_model: RatingModelService | None = None,
 ) -> FastAPI:
     config = config or APIConfig.from_env()
     monitoring = monitoring or MonitoringService.from_env()
+    configure_logging()
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):  # noqa: ARG001
@@ -654,6 +684,7 @@ def create_app(
     app.state.monitoring = monitoring
     app.state.kafka_producer = kafka_producer
     app.state.etl_runner = etl_runner or SubprocessETLJobRunner()
+    app.state.rating_model = rating_model
 
     if config.cors_allowed_origins:
         app.add_middleware(
@@ -679,6 +710,17 @@ def create_app(
         if not _is_public_path(request.url.path):
             response.headers["X-Content-Type-Options"] = "nosniff"
             response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.middleware("http")
+    async def add_request_id(request: Request, call_next):
+        request_id = request.headers.get("x-request-id") or os.urandom(8).hex()
+        token = request_id_var.set(request_id)
+        try:
+            response = await call_next(request)
+        finally:
+            request_id_var.reset(token)
+        response.headers["X-Request-ID"] = request_id
         return response
 
     return app
@@ -746,6 +788,12 @@ def get_etl_runner(request: Request) -> ETLJobRunner:
     return request.app.state.etl_runner
 
 
+def get_rating_model(request: Request) -> RatingModelService:
+    if request.app.state.rating_model is None:
+        request.app.state.rating_model = RatingModelService.from_env()
+    return request.app.state.rating_model
+
+
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     config: APIConfig = Depends(get_config),
@@ -763,6 +811,32 @@ def get_current_user(
             detail=str(exc),
         ) from exc
     return CurrentUser(user_id=payload.sub, scopes=payload.scopes)
+
+
+ADMIN_SCOPE = "admin"
+
+
+def require_scopes(*required_scopes: str):
+    """Dependency factory enforcing token scopes (RBAC).
+
+    A token passes when it carries every required scope or the ``admin``
+    scope. Regular customer tokens without scopes get 403, so endpoints such
+    as approvals resolution stay reviewer-only.
+    """
+
+    def checker(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+        token_scopes = set(user.scopes)
+        if ADMIN_SCOPE in token_scopes:
+            return user
+        missing = [scope for scope in required_scopes if scope not in token_scopes]
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Token is missing required scopes: {', '.join(missing)}.",
+            )
+        return user
+
+    return checker
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -795,8 +869,36 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _qdrant_ready(request: Request) -> bool:
+    """Check Qdrant connectivity without triggering the in-memory fallback."""
+    search_service = request.app.state.search_service
+    service_ping = getattr(search_service, "ping", None)
+    if search_service is not None and callable(service_ping):
+        try:
+            return bool(service_ping())
+        except Exception:  # noqa: BLE001
+            return False
+
+    try:
+        from qdrant_client import QdrantClient
+
+        from src.vector_store import VectorStoreConfig
+
+        vector_config = VectorStoreConfig.from_env()
+        client = QdrantClient(
+            host=vector_config.qdrant_host,
+            port=vector_config.qdrant_port,
+            timeout=2.0,
+        )
+        client.get_collections()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @app.get("/health/ready")
 async def readiness(request: Request) -> JSONResponse:
+    config: APIConfig = request.app.state.config
     try:
         cache_service = get_cache_service(request)
         redis_ok = cache_service.ping()
@@ -815,6 +917,20 @@ async def readiness(request: Request) -> JSONResponse:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"status": "unhealthy", "redis": "unavailable"},
         )
+
+    if config.readiness_check_qdrant:
+        qdrant_ok = await asyncio.to_thread(_qdrant_ready, request)
+        if not qdrant_ok:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "status": "unhealthy",
+                    "redis": "ok",
+                    "qdrant": "unavailable",
+                },
+            )
+        return JSONResponse(content={"status": "ok", "redis": "ok", "qdrant": "ok"})
+
     return JSONResponse(content={"status": "ok", "redis": "ok"})
 
 
@@ -844,7 +960,10 @@ async def search(
     filter_payload = _filters_to_dict(filters)
 
     try:
-        cached_results = cache_service.get_cached_search(
+        # Redis/Qdrant clients are synchronous; run them in the threadpool so
+        # slow calls do not stall the event loop for other requests.
+        cached_results = await asyncio.to_thread(
+            cache_service.get_cached_search,
             query,
             filters=filter_payload,
             top_k=top_k,
@@ -858,8 +977,11 @@ async def search(
                 top_k=top_k,
             )
 
-        results = search_service.search_products(query, filters=filters, top_k=top_k)
-        cache_service.set_cached_search(
+        results = await asyncio.to_thread(
+            search_service.search_products, query, filters=filters, top_k=top_k
+        )
+        await asyncio.to_thread(
+            cache_service.set_cached_search,
             query,
             results,
             filters=filter_payload,
@@ -891,18 +1013,24 @@ async def stream_agent_response(
 ) -> AsyncIterator[str]:
     history: list[dict[str, Any]] = []
     if request.session_id:
-        history = cache_service.get_session_messages(
+        # Sync Redis calls: keep them off the event loop.
+        history = await asyncio.to_thread(
+            cache_service.get_session_messages,
             request.session_id,
             limit=config.chat_history_limit,
         )
-        cache_service.append_session_message(
+        await asyncio.to_thread(
+            cache_service.append_session_message,
             request.session_id,
             "user",
             request.message,
         )
 
     monitoring.record_chat()
-    response = agent.handle_message(
+    # The agent may call an LLM synchronously (up to ~30s); running it on the
+    # threadpool keeps other requests on this worker responsive.
+    response = await asyncio.to_thread(
+        agent.handle_message,
         request.message,
         history=history,
         approved_by_human=request.approved_by_human,
@@ -911,10 +1039,23 @@ async def stream_agent_response(
     for event in response.trace_events:
         if event.event == "tool_call" and event.tool:
             monitoring.record_agent_tool_call(event.tool, event.status)
+        elif event.event == "llm_call":
+            monitoring.record_llm_call(
+                name="agent-llm-routing",
+                model=event.metadata.get("model"),
+                latency_seconds=event.latency_seconds,
+                prompt_tokens=int(event.metadata.get("prompt_tokens") or 0),
+                completion_tokens=int(event.metadata.get("completion_tokens") or 0),
+                session_id=request.session_id,
+                input_text=event.metadata.get("input_text"),
+                output_text=response.content,
+                metadata={"action": response.action},
+            )
 
     approval_request_id: str | None = None
     if response.requires_human_review:
-        approval = cache_service.create_human_approval_request(
+        approval = await asyncio.to_thread(
+            cache_service.create_human_approval_request,
             session_id=request.session_id or "ad-hoc",
             message=request.message,
             history=history,
@@ -924,7 +1065,8 @@ async def stream_agent_response(
         approval_request_id = approval.request_id
 
     if request.session_id:
-        cache_service.append_session_message(
+        await asyncio.to_thread(
+            cache_service.append_session_message,
             request.session_id,
             "assistant",
             response.content,
@@ -999,6 +1141,7 @@ async def chat_stream(
 async def list_pending_human_approvals(
     limit: int = 20,
     cache_service: CacheService = Depends(get_cache_service),
+    _reviewer: CurrentUser = Depends(require_scopes("approvals:read")),
     _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
 ) -> HumanApprovalListResponse:
     if limit < 1 or limit > 100:
@@ -1006,7 +1149,9 @@ async def list_pending_human_approvals(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="limit must be between 1 and 100.",
         )
-    requests = cache_service.list_pending_human_approvals(limit=limit)
+    requests = await asyncio.to_thread(
+        cache_service.list_pending_human_approvals, limit=limit
+    )
     return HumanApprovalListResponse(
         requests=[_approval_payload(request) for request in requests]
     )
@@ -1019,9 +1164,12 @@ async def list_pending_human_approvals(
 async def get_human_approval(
     request_id: str,
     cache_service: CacheService = Depends(get_cache_service),
+    _reviewer: CurrentUser = Depends(require_scopes("approvals:read")),
     _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
 ) -> HumanApprovalRequestPayload:
-    approval = cache_service.get_human_approval_request(request_id)
+    approval = await asyncio.to_thread(
+        cache_service.get_human_approval_request, request_id
+    )
     if approval is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1038,12 +1186,13 @@ async def resolve_human_approval(
     request_id: str,
     payload: ResolveHumanApprovalRequest,
     cache_service: CacheService = Depends(get_cache_service),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_scopes("approvals:write")),
     _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
 ) -> HumanApprovalRequestPayload:
     reviewer = payload.reviewer or current_user.user_id
     try:
-        approval = cache_service.resolve_human_approval_request(
+        approval = await asyncio.to_thread(
+            cache_service.resolve_human_approval_request,
             request_id=request_id,
             approved=payload.approved,
             reviewer=reviewer,
@@ -1104,6 +1253,133 @@ async def upload_catalog(
     )
 
 
+class UploadStatusSummary(BaseModel):
+    upload_name: str
+    filename: str | None = None
+    status: str = "unknown"
+    etl_status: str | None = None
+    created_at: str | None = None
+
+
+class UploadStatusListResponse(BaseModel):
+    uploads: list[UploadStatusSummary]
+
+
+def _manifest_to_summary(
+    manifest_path: Path, manifest: dict[str, Any]
+) -> UploadStatusSummary:
+    upload_name = manifest_path.name.removesuffix(".manifest.json")
+    etl_info = manifest.get("etl") or {}
+    return UploadStatusSummary(
+        upload_name=upload_name,
+        filename=manifest.get("filename"),
+        status=str(manifest.get("status", "unknown")),
+        etl_status=etl_info.get("status"),
+        created_at=manifest.get("created_at"),
+    )
+
+
+@app.get("/catalog/uploads", response_model=UploadStatusListResponse)
+async def list_catalog_uploads(
+    limit: int = 20,
+    config: APIConfig = Depends(get_config),
+    _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
+) -> UploadStatusListResponse:
+    """Return recent catalog uploads with their ETL status from manifests."""
+    if limit < 1 or limit > 100:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="limit must be between 1 and 100.",
+        )
+    upload_dir = Path(config.upload_dir)
+    if not upload_dir.exists():
+        return UploadStatusListResponse(uploads=[])
+
+    manifests = sorted(
+        upload_dir.glob("*.manifest.json"),
+        key=lambda path: path.name,
+        reverse=True,
+    )[:limit]
+    uploads = []
+    for manifest_path in manifests:
+        try:
+            manifest = _load_upload_manifest(manifest_path)
+        except (json.JSONDecodeError, OSError):
+            manifest = {}
+        uploads.append(_manifest_to_summary(manifest_path, manifest))
+    return UploadStatusListResponse(uploads=uploads)
+
+
+@app.get("/catalog/uploads/{upload_name}")
+async def get_catalog_upload_status(
+    upload_name: str,
+    config: APIConfig = Depends(get_config),
+    _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
+) -> dict[str, Any]:
+    """Return the full manifest (including ETL result) for one upload."""
+    clean_name = PurePath(upload_name).name
+    if clean_name != upload_name or not clean_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid upload name.",
+        )
+    manifest_path = Path(config.upload_dir) / f"{clean_name}.manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Upload not found.",
+        )
+    return _load_upload_manifest(manifest_path)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 × Phase 8: MLflow registered model serving
+# ---------------------------------------------------------------------------
+
+
+class RatingPredictionProduct(BaseModel):
+    product_id: str | None = None
+    title: str = ""
+    description: str = ""
+    brand: str = ""
+    category: str = ""
+    price_tier: str = ""
+
+
+class RatingPredictionRequest(BaseModel):
+    products: list[RatingPredictionProduct] = Field(min_length=1, max_length=100)
+
+
+class RatingPredictionResponse(BaseModel):
+    model_uri: str
+    predictions: list[dict[str, Any]]
+
+
+@app.post("/predict/rating", response_model=RatingPredictionResponse)
+async def predict_rating(
+    request: RatingPredictionRequest,
+    rating_model: RatingModelService = Depends(get_rating_model),
+    _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
+) -> RatingPredictionResponse:
+    """Score products with the MLflow champion rating classifier."""
+    products = [product.model_dump() for product in request.products]
+    try:
+        predictions = await asyncio.to_thread(rating_model.predict, products)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    return RatingPredictionResponse(
+        model_uri=rating_model.config.model_uri,
+        predictions=predictions,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Phase 5 × Phase 8: Clickstream event endpoint (Kafka producer integration)
 # ---------------------------------------------------------------------------
@@ -1148,7 +1424,9 @@ async def record_click_event(
 
     if kafka is not None:
         try:
-            published = kafka.log_click(
+            # log_click retries with backoff sleeps; keep it off the event loop.
+            published = await asyncio.to_thread(
+                kafka.log_click,
                 user_id=request.user_id,
                 product_id=request.product_id,
                 session_id=request.session_id,
