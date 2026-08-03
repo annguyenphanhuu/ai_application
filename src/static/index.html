@@ -1030,6 +1030,10 @@
         border-left: 4px solid var(--danger);
       }
 
+      .toast.warn {
+        border-left: 4px solid var(--warning, #f5a524);
+      }
+
       /* Responsive Rules */
       @media (max-width: 1080px) {
         .app {
@@ -1424,6 +1428,9 @@
       const state = {
         token: localStorage.getItem("smartshop_token") || "",
         sessionId: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+        // {id, message} of the approval raised for the last chat turn, so the
+        // same message can be resent once a reviewer approves it.
+        pendingApproval: null,
       };
 
       const notice = $("#notice");
@@ -1534,13 +1541,17 @@
           appendMessage("user", message);
           $("#chatMessage").value = "";
           const assistantMessage = appendMessage("assistant", "Đang suy nghĩ...");
+          // When a reviewer has approved this exact message, resending it
+          // carries the approval id so the server can redeem it. The server
+          // checks session + message and allows a single redemption.
+          const body = { message, session_id: state.sessionId };
+          if (state.pendingApproval && state.pendingApproval.message === message) {
+            body.approval_request_id = state.pendingApproval.id;
+          }
           const response = await fetch("/chat", {
             method: "POST",
             headers: authHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify({
-              message,
-              session_id: state.sessionId,
-            }),
+            body: JSON.stringify(body),
           });
           if (!response.ok) {
             throw new Error(await response.text());
@@ -1570,8 +1581,20 @@
                 streamed += `${payload.content} `;
                 assistantMessage.textContent = streamed.trim();
               }
-              if (event.name === "done" && payload.content) {
-                assistantMessage.textContent = payload.content;
+              if (event.name === "done") {
+                if (payload.content) {
+                  assistantMessage.textContent = payload.content;
+                }
+                state.pendingApproval = payload.approval_request_id
+                  ? { id: payload.approval_request_id, message }
+                  : null;
+                if (payload.requires_human_review) {
+                  showNotice(
+                    "Yêu cầu cần người duyệt. Vào tab Approvals để duyệt, " +
+                      "sau đó gửi lại đúng nội dung này.",
+                    "warn",
+                  );
+                }
               }
             }
           }

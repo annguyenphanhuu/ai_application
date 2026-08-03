@@ -14,11 +14,14 @@ import hashlib
 import hmac
 import importlib.util
 import json
+import logging
 import os
 import re
 import shlex
 import subprocess
 import sys
+import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -26,6 +29,7 @@ from pathlib import Path, PurePath
 from typing import Any, AsyncIterator, Protocol
 
 from fastapi import (
+    APIRouter,
     BackgroundTasks,
     Depends,
     FastAPI,
@@ -37,11 +41,16 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
-from src.agent import ProductSearchTool, SmartShopAgent
+from src.agent import (
+    AgentResponse,
+    AgentTraceEvent,
+    ProductSearchTool,
+    SmartShopAgent,
+    build_langgraph_app,
+)
 from src.cache_service import (
     HumanApprovalRequest,
     RateLimitResult,
@@ -51,13 +60,21 @@ from src.cache_service import (
 from src.logging_config import configure_logging, request_id_var
 from src.model_service import RatingModelService
 from src.monitoring import MonitoringService
-from src.streaming import KafkaClickEventProducer, StreamingConfig
+from src.streaming import (
+    KafkaClickEventProducer,
+    RedisHotProductsStore,
+    StreamingConfig,
+)
 from src.vector_store import ProductSearchFilters, VectorSearchService
 
 DEFAULT_API_TITLE = "SmartShop AI API Layer"
 DEFAULT_UPLOAD_DIR = "data/uploads/catalog"
 DEFAULT_ETL_OUTPUT_DIR = "data/processed/catalog_uploads"
 DEFAULT_JWT_SECRET = "dev-smartshop-secret"
+# Environments where developer conveniences (the built-in HS256 secret, a
+# client-asserted human approval) are tolerated.  Anywhere else they are
+# refused.
+DEV_ENVIRONMENTS = frozenset({"dev", "local", "test"})
 DEFAULT_CORS_ALLOWED_ORIGINS = (
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -69,7 +86,13 @@ PUBLIC_PATHS = {"/", "/health", "/health/ready"}
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 INDEX_HTML_PATH = STATIC_DIR / "index.html"
 
+logger = logging.getLogger(__name__)
+
 bearer_scheme = HTTPBearer(auto_error=False)
+
+# Endpoints are registered on this router, not on a module-level app, so every
+# app built by create_app() gets its own properly-bound copy.
+router = APIRouter()
 
 
 class CacheService(Protocol):
@@ -142,6 +165,15 @@ class CacheService(Protocol):
     ) -> list[HumanApprovalRequest]:
         """Return pending human approval requests."""
 
+    def consume_human_approval_request(
+        self,
+        request_id: str,
+        session_id: str,
+        message: str,
+        ttl_seconds: int | None = None,
+    ) -> HumanApprovalRequest | None:
+        """Redeem an approved request exactly once."""
+
     def resolve_human_approval_request(
         self,
         request_id: str,
@@ -208,6 +240,7 @@ class APIConfig:
     chat_history_limit: int = 20
     chat_chunk_delay_seconds: float = 0.0
     readiness_check_qdrant: bool = False
+    agent_use_graph: bool = True
 
     @classmethod
     def from_env(cls) -> "APIConfig":
@@ -239,8 +272,9 @@ class APIConfig:
             ),
             readiness_check_qdrant=_env_bool(
                 "SMARTSHOP_READINESS_CHECK_QDRANT",
-                environment.strip().lower() not in {"dev", "local", "test"},
+                environment.strip().lower() not in DEV_ENVIRONMENTS,
             ),
+            agent_use_graph=_env_bool("SMARTSHOP_AGENT_USE_GRAPH", True),
         )
 
 
@@ -268,6 +302,11 @@ class SearchResponse(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
     session_id: str | None = None
+    approval_request_id: str | None = None
+    # Deprecated: a client-asserted approval is not evidence that a reviewer
+    # approved anything.  Honoured only in dev/local/test so existing local
+    # tooling keeps working; outside those environments the server derives
+    # approval solely from `approval_request_id`.
     approved_by_human: bool = False
 
 
@@ -452,7 +491,7 @@ def verify_access_token(token: str, config_or_secret: APIConfig | str) -> TokenP
         return _verify_issuer_access_token(token, config)
 
     if (
-        config.environment.strip().lower() not in {"dev", "local", "test"}
+        config.environment.strip().lower() not in DEV_ENVIRONMENTS
         and config.jwt_secret == DEFAULT_JWT_SECRET
     ):
         raise HTTPException(
@@ -664,6 +703,7 @@ def create_app(
     kafka_producer: KafkaClickEventProducer | None = None,
     etl_runner: ETLJobRunner | None = None,
     rating_model: RatingModelService | None = None,
+    hot_products_store: Any | None = None,
 ) -> FastAPI:
     config = config or APIConfig.from_env()
     monitoring = monitoring or MonitoringService.from_env()
@@ -681,8 +721,11 @@ def create_app(
     app.state.cache_service = cache_service
     app.state.search_service = search_service
     app.state.agent = agent
+    app.state.agent_graph = None
+    app.state.graph_unavailable = False
     app.state.monitoring = monitoring
     app.state.kafka_producer = kafka_producer
+    app.state.hot_products_store = hot_products_store
     app.state.etl_runner = etl_runner or SubprocessETLJobRunner()
     app.state.rating_model = rating_model
 
@@ -698,11 +741,12 @@ def create_app(
     # Phase 10: attach Prometheus /metrics endpoint
     monitoring.instrument(app)
 
-    route_source = globals().get("app")
-    if route_source is not None:
-        for route in route_source.routes:
-            if isinstance(route, APIRoute):
-                app.router.routes.append(route)
+    # Routes live on a module-level APIRouter and are attached here.
+    # include_router rebinds each route to *this* app, which is what makes
+    # dependency_overrides work on apps built by create_app. (Copying route
+    # objects off a module-level app instead left them bound to that app, so
+    # overrides on a test app were silently ignored.)
+    app.include_router(router)
 
     @app.middleware("http")
     async def add_security_headers(request: Request, call_next):
@@ -758,6 +802,26 @@ def get_agent(request: Request) -> SmartShopAgent:
     return request.app.state.agent
 
 
+def get_agent_graph(request: Request) -> Any | None:
+    """Return the compiled LangGraph app, or None when it is unavailable.
+
+    The slim `runtime` image does not ship langgraph, so the graph is optional
+    and `/chat` falls back to calling the agent directly.  `_graph_unavailable`
+    caches the failure so a missing dependency is not retried per request.
+    """
+    config: APIConfig = request.app.state.config
+    if not config.agent_use_graph or request.app.state.graph_unavailable:
+        return None
+    if request.app.state.agent_graph is None:
+        try:
+            request.app.state.agent_graph = build_langgraph_app(get_agent(request))
+        except (RuntimeError, ImportError) as exc:
+            logger.warning("langgraph unavailable; using direct agent: %s", exc)
+            request.app.state.graph_unavailable = True
+            return None
+    return request.app.state.agent_graph
+
+
 def get_monitoring(request: Request) -> MonitoringService:
     return request.app.state.monitoring
 
@@ -782,6 +846,26 @@ def get_kafka_producer(request: Request) -> KafkaClickEventProducer | None:
             # kafka-python not installed or broker unreachable at startup
             pass
     return request.app.state.kafka_producer
+
+
+def get_hot_products_store(request: Request) -> Any | None:
+    """Lazily build the Redis hot-products reader.
+
+    The Kafka click-consumer writes this leaderboard; returning None when Redis
+    is unavailable keeps recommendations degrading to pure vector similarity
+    instead of failing the request.
+    """
+    if request.app.state.hot_products_store is None:
+        cfg = StreamingConfig.from_env()
+        try:
+            request.app.state.hot_products_store = RedisHotProductsStore(
+                host=os.getenv("REDIS_HOST", "localhost"),
+                port=int(os.getenv("REDIS_PORT", "6379")),
+                key=cfg.hot_products_key,
+            )
+        except RuntimeError:
+            return None
+    return request.app.state.hot_products_store
 
 
 def get_etl_runner(request: Request) -> ETLJobRunner:
@@ -839,7 +923,7 @@ def require_scopes(*required_scopes: str):
     return checker
 
 
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+@router.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def web_console() -> HTMLResponse:
     if not INDEX_HTML_PATH.exists():
         raise HTTPException(
@@ -864,7 +948,7 @@ def enforce_rate_limit(
     return result
 
 
-@app.get("/health")
+@router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
 
@@ -896,7 +980,7 @@ def _qdrant_ready(request: Request) -> bool:
         return False
 
 
-@app.get("/health/ready")
+@router.get("/health/ready")
 async def readiness(request: Request) -> JSONResponse:
     config: APIConfig = request.app.state.config
     try:
@@ -934,7 +1018,7 @@ async def readiness(request: Request) -> JSONResponse:
     return JSONResponse(content={"status": "ok", "redis": "ok"})
 
 
-@app.get("/search", response_model=SearchResponse)
+@router.get("/search", response_model=SearchResponse)
 async def search(
     query: str,
     category: str | None = None,
@@ -944,6 +1028,7 @@ async def search(
     top_k: int = 5,
     cache_service: CacheService = Depends(get_cache_service),
     search_service: SearchService = Depends(get_search_service),
+    monitoring: MonitoringService = Depends(get_monitoring),
     _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
 ) -> SearchResponse:
     if top_k < 1 or top_k > 50:
@@ -958,6 +1043,7 @@ async def search(
         max_price=max_price,
     )
     filter_payload = _filters_to_dict(filters)
+    started = time.perf_counter()
 
     try:
         # Redis/Qdrant clients are synchronous; run them in the threadpool so
@@ -969,6 +1055,7 @@ async def search(
             top_k=top_k,
         )
         if cached_results is not None:
+            monitoring.record_search("cache", time.perf_counter() - started)
             return SearchResponse(
                 query=query,
                 source="cache",
@@ -988,13 +1075,16 @@ async def search(
             top_k=top_k,
         )
     except ValueError as exc:
+        monitoring.record_search("error", time.perf_counter() - started)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     except Exception as exc:
+        monitoring.record_search("error", time.perf_counter() - started)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Search service is unavailable: {exc}",
         ) from exc
 
+    monitoring.record_search("vector_store", time.perf_counter() - started)
     return SearchResponse(
         query=query,
         source="vector_store",
@@ -1004,12 +1094,104 @@ async def search(
     )
 
 
+async def _resolve_human_approval(
+    request: ChatRequest,
+    cache_service: CacheService,
+    config: APIConfig,
+) -> bool:
+    """Decide server-side whether this turn carries a real human approval.
+
+    The only trustworthy evidence is an approval record in Redis that a
+    reviewer resolved as ``approved``, that was raised for this exact session
+    and message, and that has not been redeemed yet.  ``approved_by_human`` on
+    the request body is client-controlled and therefore proves nothing.
+    """
+    if request.approval_request_id:
+        approval = await asyncio.to_thread(
+            cache_service.consume_human_approval_request,
+            request.approval_request_id,
+            request.session_id or "ad-hoc",
+            request.message,
+        )
+        if approval is not None:
+            return True
+        logger.warning(
+            "rejected_human_approval",
+            extra={"approval_request_id": request.approval_request_id},
+        )
+        return False
+
+    if request.approved_by_human:
+        if config.environment.strip().lower() in DEV_ENVIRONMENTS:
+            return True
+        logger.warning(
+            "ignored_client_asserted_approval",
+            extra={"environment": config.environment},
+        )
+    return False
+
+
+def _run_agent_graph(
+    graph: Any,
+    request: ChatRequest,
+    history: list[dict[str, Any]],
+    approved_by_human: bool,
+    on_token: Any = None,
+) -> AgentResponse:
+    """Drive one turn through the compiled graph and return its AgentResponse.
+
+    Redis stays the source of truth for conversation history (it outlives the
+    process and is shared across pods), so each turn seeds the graph with that
+    history.  The checkpointer's job here is the interrupt/resume handshake:
+    when the graph halts before human review, resuming with ``None`` continues
+    from the checkpoint rather than re-routing the message.
+    """
+    thread_config = {
+        "configurable": {
+            "thread_id": request.session_id or f"ad-hoc:{uuid.uuid4()}",
+            "on_token": on_token,
+        }
+    }
+    state = graph.invoke(
+        {
+            "messages": history + [{"role": "user", "content": request.message}],
+            "approved_by_human": approved_by_human,
+            "tool_outputs": [],
+            # Clear the previous turn's result. Without this an interrupted
+            # turn would read the last turn's leftovers out of the checkpoint
+            # and answer with a stale response.
+            "content": None,
+            "requires_human_review": False,
+            "trace_events": [],
+            "decision": None,
+        },
+        config=thread_config,
+    )
+    # An interrupt parks the run before the node executes, leaving no content
+    # in state; resume so the caller always receives a completed turn.
+    if graph.get_state(thread_config).next:
+        state = graph.invoke(None, config=thread_config)
+
+    return AgentResponse(
+        content=state.get("content") or "",
+        action=state.get("next_action", "fallback"),
+        messages=state.get("messages", []),
+        tool_outputs=state.get("tool_outputs") or [],
+        requires_human_review=bool(state.get("requires_human_review", False)),
+        reason=state.get("reason", ""),
+        trace_events=[
+            AgentTraceEvent(**event) for event in state.get("trace_events") or []
+        ],
+    )
+
+
 async def stream_agent_response(
     request: ChatRequest,
     agent: SmartShopAgent,
     cache_service: CacheService,
     config: APIConfig,
     monitoring: MonitoringService,
+    graph: Any | None = None,
 ) -> AsyncIterator[str]:
     history: list[dict[str, Any]] = []
     if request.session_id:
@@ -1026,16 +1208,71 @@ async def stream_agent_response(
             request.message,
         )
 
+    approved_by_human = await _resolve_human_approval(request, cache_service, config)
+
     monitoring.record_chat()
     # The agent may call an LLM synchronously (up to ~30s); running it on the
     # threadpool keeps other requests on this worker responsive.
-    response = await asyncio.to_thread(
-        agent.handle_message,
-        request.message,
-        history=history,
-        approved_by_human=request.approved_by_human,
+    # Real token streaming: the agent runs on a worker thread and pushes LLM
+    # tokens into this queue as they arrive, so the client sees text while the
+    # model is still generating rather than after it finished.
+    loop = asyncio.get_running_loop()
+    token_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    streamed_any = False
+
+    def emit_token(text: str) -> None:
+        loop.call_soon_threadsafe(token_queue.put_nowait, text)
+
+    async def drain_tokens() -> AsyncIterator[str]:
+        while True:
+            token = await token_queue.get()
+            if token is None:
+                return
+            yield token
+
+    if graph is not None:
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                _run_agent_graph,
+                graph,
+                request,
+                history,
+                approved_by_human,
+                emit_token,
+            )
+        )
+    else:
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                agent.handle_message,
+                request.message,
+                history=history,
+                approved_by_human=approved_by_human,
+                on_token=emit_token,
+            )
+        )
+    # Sentinel closes the drain loop once the agent finishes, whether it
+    # streamed anything or not.
+    worker.add_done_callback(
+        lambda _t: loop.call_soon_threadsafe(token_queue.put_nowait, None)
     )
-    monitoring.record_agent_decision(response.action)
+
+    # The action is not known until routing completes, so `start` only signals
+    # that the turn began; `done` carries the authoritative result.
+    yield _sse_event("start", {"streaming": True})
+
+    async for token in drain_tokens():
+        streamed_any = True
+        yield _sse_event("chunk", {"content": token})
+
+    response = await worker
+
+    routing_mode = (
+        "llm"
+        if any(event.event == "llm_call" for event in response.trace_events)
+        else "rules"
+    )
+    monitoring.record_agent_decision(response.action, mode=routing_mode)
     for event in response.trace_events:
         if event.event == "tool_call" and event.tool:
             monitoring.record_agent_tool_call(event.tool, event.status)
@@ -1077,17 +1314,17 @@ async def stream_agent_response(
             },
         )
 
-    yield _sse_event(
-        "start",
-        {
-            "action": response.action,
-            "approval_request_id": approval_request_id,
-        },
-    )
-    for chunk in response.content.split():
-        yield _sse_event("chunk", {"content": chunk})
-        if config.chat_chunk_delay_seconds > 0:
-            await asyncio.sleep(config.chat_chunk_delay_seconds)
+    if not streamed_any:
+        # Rule-based/template answers never reach an LLM, so there is nothing
+        # to stream. Emit the text in line-sized pieces: splitting on
+        # whitespace (as this used to) destroyed the newlines that
+        # format_product_hits deliberately produces.
+        for line in response.content.splitlines(keepends=True):
+            if line:
+                yield _sse_event("chunk", {"content": line})
+                if config.chat_chunk_delay_seconds > 0:
+                    await asyncio.sleep(config.chat_chunk_delay_seconds)
+
     yield _sse_event(
         "done",
         {
@@ -1100,44 +1337,48 @@ async def stream_agent_response(
     )
 
 
-@app.post("/chat")
+@router.post("/chat")
 async def chat(
     request: ChatRequest,
     agent: SmartShopAgent = Depends(get_agent),
     cache_service: CacheService = Depends(get_cache_service),
     config: APIConfig = Depends(get_config),
     monitoring: MonitoringService = Depends(get_monitoring),
+    graph: Any | None = Depends(get_agent_graph),
     _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
 ) -> StreamingResponse:
     return StreamingResponse(
-        stream_agent_response(request, agent, cache_service, config, monitoring),
+        stream_agent_response(request, agent, cache_service, config, monitoring, graph),
         media_type="text/event-stream",
     )
 
 
-@app.get("/chat/stream")
+@router.get("/chat/stream")
 async def chat_stream(
     message: str,
     session_id: str | None = None,
+    approval_request_id: str | None = None,
     approved_by_human: bool = False,
     agent: SmartShopAgent = Depends(get_agent),
     cache_service: CacheService = Depends(get_cache_service),
     config: APIConfig = Depends(get_config),
     monitoring: MonitoringService = Depends(get_monitoring),
+    graph: Any | None = Depends(get_agent_graph),
     _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
 ) -> StreamingResponse:
     request = ChatRequest(
         message=message,
         session_id=session_id,
+        approval_request_id=approval_request_id,
         approved_by_human=approved_by_human,
     )
     return StreamingResponse(
-        stream_agent_response(request, agent, cache_service, config, monitoring),
+        stream_agent_response(request, agent, cache_service, config, monitoring, graph),
         media_type="text/event-stream",
     )
 
 
-@app.get("/approvals/pending", response_model=HumanApprovalListResponse)
+@router.get("/approvals/pending", response_model=HumanApprovalListResponse)
 async def list_pending_human_approvals(
     limit: int = 20,
     cache_service: CacheService = Depends(get_cache_service),
@@ -1157,7 +1398,7 @@ async def list_pending_human_approvals(
     )
 
 
-@app.get(
+@router.get(
     "/approvals/{request_id}",
     response_model=HumanApprovalRequestPayload,
 )
@@ -1178,7 +1419,7 @@ async def get_human_approval(
     return _approval_payload(approval)
 
 
-@app.post(
+@router.post(
     "/approvals/{request_id}/resolve",
     response_model=HumanApprovalRequestPayload,
 )
@@ -1206,8 +1447,8 @@ async def resolve_human_approval(
     return _approval_payload(approval)
 
 
-@app.post("/upload", response_model=UploadResponse)
-@app.post("/catalog/upload", response_model=UploadResponse)
+@router.post("/upload", response_model=UploadResponse)
+@router.post("/catalog/upload", response_model=UploadResponse)
 async def upload_catalog(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -1279,7 +1520,7 @@ def _manifest_to_summary(
     )
 
 
-@app.get("/catalog/uploads", response_model=UploadStatusListResponse)
+@router.get("/catalog/uploads", response_model=UploadStatusListResponse)
 async def list_catalog_uploads(
     limit: int = 20,
     config: APIConfig = Depends(get_config),
@@ -1310,7 +1551,7 @@ async def list_catalog_uploads(
     return UploadStatusListResponse(uploads=uploads)
 
 
-@app.get("/catalog/uploads/{upload_name}")
+@router.get("/catalog/uploads/{upload_name}")
 async def get_catalog_upload_status(
     upload_name: str,
     config: APIConfig = Depends(get_config),
@@ -1355,7 +1596,7 @@ class RatingPredictionResponse(BaseModel):
     predictions: list[dict[str, Any]]
 
 
-@app.post("/predict/rating", response_model=RatingPredictionResponse)
+@router.post("/predict/rating", response_model=RatingPredictionResponse)
 async def predict_rating(
     request: RatingPredictionRequest,
     rating_model: RatingModelService = Depends(get_rating_model),
@@ -1385,6 +1626,32 @@ async def predict_rating(
 # ---------------------------------------------------------------------------
 
 
+class HotProduct(BaseModel):
+    product_id: str
+    click_count: int
+
+
+class HotProductsResponse(BaseModel):
+    products: list[HotProduct]
+    source: str = "redis"
+
+
+class RecommendationItem(BaseModel):
+    product_id: str
+    title: str | None = None
+    price: float | None = None
+    category: str | None = None
+    similarity: float = 0.0
+    click_count: int = 0
+    score: float = 0.0
+
+
+class RecommendationsResponse(BaseModel):
+    query: str | None = None
+    strategy: str
+    results: list[RecommendationItem]
+
+
 class ClickEventRequest(BaseModel):
     user_id: str = Field(min_length=1)
     product_id: str = Field(min_length=1)
@@ -1399,10 +1666,136 @@ class ClickEventResponse(BaseModel):
     kafka_available: bool
 
 
-@app.post("/events/click", response_model=ClickEventResponse)
-async def record_click_event(
+@router.get("/products/hot", response_model=HotProductsResponse)
+async def hot_products(
+    limit: int = 10,
+    hot_store: Any | None = Depends(get_hot_products_store),
+    _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
+) -> HotProductsResponse:
+    """Trending products, ranked by real click volume.
+
+    Closes the Phase 5 loop: /events/click -> Kafka -> click-consumer -> Redis
+    sorted set -> here. Previously the leaderboard was written but never read.
+    """
+    if limit < 1 or limit > 100:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="limit must be between 1 and 100.",
+        )
+    if hot_store is None:
+        return HotProductsResponse(products=[], source="unavailable")
+
+    rows = await asyncio.to_thread(hot_store.top_products, limit)
+    return HotProductsResponse(
+        products=[
+            HotProduct(
+                product_id=str(row["product_id"]),
+                click_count=int(row.get("click_count", 0)),
+            )
+            for row in rows
+        ]
+    )
+
+
+@router.get("/recommendations", response_model=RecommendationsResponse)
+async def recommendations(
+    query: str | None = None,
+    category: str | None = None,
+    top_k: int = 5,
+    popularity_weight: float = 0.3,
+    search_service: SearchService = Depends(get_search_service),
+    hot_store: Any | None = Depends(get_hot_products_store),
+    _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
+) -> RecommendationsResponse:
+    """Recommend products by blending semantic similarity with click popularity.
+
+    Two signals, because either alone is weak: vector similarity knows what
+    matches the request but nothing about demand, while the click leaderboard
+    knows demand but nothing about the request. Without ``query`` this degrades
+    to pure trending.
+    """
+    if top_k < 1 or top_k > 50:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="top_k must be between 1 and 50.",
+        )
+    if not 0.0 <= popularity_weight <= 1.0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="popularity_weight must be between 0 and 1.",
+        )
+
+    clicks: dict[str, int] = {}
+    if hot_store is not None:
+        rows = await asyncio.to_thread(hot_store.top_products, 100)
+        clicks = {
+            str(row["product_id"]): int(row.get("click_count", 0)) for row in rows
+        }
+
+    if not query:
+        # No query: trending only.
+        ranked = sorted(clicks.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
+        return RecommendationsResponse(
+            query=None,
+            strategy="popularity",
+            results=[
+                RecommendationItem(
+                    product_id=product_id, click_count=count, score=float(count)
+                )
+                for product_id, count in ranked
+            ],
+        )
+
+    try:
+        hits = await asyncio.to_thread(
+            search_service.search_products,
+            query,
+            filters=ProductSearchFilters(category=category),
+            top_k=max(top_k * 2, top_k),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Search service is unavailable: {exc}",
+        ) from exc
+
+    # Normalise click counts to 0..1 so the weight means the same thing
+    # regardless of absolute traffic volume.
+    max_clicks = max(clicks.values()) if clicks else 0
+    items: list[RecommendationItem] = []
+    for hit in hits:
+        product_id = str(hit.get("product_id") or "")
+        similarity = float(hit.get("score") or 0.0)
+        click_count = clicks.get(product_id, 0)
+        popularity = (click_count / max_clicks) if max_clicks else 0.0
+        items.append(
+            RecommendationItem(
+                product_id=product_id,
+                title=hit.get("title"),
+                price=hit.get("price"),
+                category=hit.get("category"),
+                similarity=similarity,
+                click_count=click_count,
+                score=(1 - popularity_weight) * similarity
+                + popularity_weight * popularity,
+            )
+        )
+
+    items.sort(key=lambda item: item.score, reverse=True)
+    return RecommendationsResponse(
+        query=query,
+        strategy="hybrid" if clicks else "similarity",
+        results=items[:top_k],
+    )
+
+
+@router.post("/events/click", response_model=ClickEventResponse)
+async def publish_click_event(
     request: ClickEventRequest,
     kafka: KafkaClickEventProducer | None = Depends(get_kafka_producer),
+    monitoring: MonitoringService = Depends(get_monitoring),
     _rate_limit: RateLimitResult = Depends(enforce_rate_limit),
 ) -> ClickEventResponse:
     """Record a product click event and publish it to Kafka.
@@ -1422,6 +1815,7 @@ async def record_click_event(
         metadata=request.metadata,
     ).to_dict()
 
+    started = time.perf_counter()
     if kafka is not None:
         try:
             # log_click retries with backoff sleeps; keep it off the event loop.
@@ -1433,6 +1827,10 @@ async def record_click_event(
                 query=request.query,
                 metadata=request.metadata,
             )
+            monitoring.record_click_event(
+                status="published",
+                latency_seconds=time.perf_counter() - started,
+            )
             return ClickEventResponse(
                 status="published", event=published, kafka_available=True
             )
@@ -1441,7 +1839,19 @@ async def record_click_event(
             import logging as _logging
 
             _logging.getLogger(__name__).error("Kafka publish error: %s", exc)
+            monitoring.record_click_event(
+                status="error",
+                latency_seconds=time.perf_counter() - started,
+                dlq=True,
+            )
+            return ClickEventResponse(
+                status="accepted_no_broker", event=event_payload, kafka_available=False
+            )
 
+    monitoring.record_click_event(
+        status="accepted_no_broker",
+        latency_seconds=time.perf_counter() - started,
+    )
     return ClickEventResponse(
         status="accepted_no_broker", event=event_payload, kafka_available=False
     )
