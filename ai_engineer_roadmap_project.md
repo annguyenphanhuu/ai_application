@@ -30,7 +30,7 @@ flowchart TB
     subgraph Service_Layer [AI Service Layer]
         MLflow -->|Load Registered Model| FastAPI[FastAPI Backend]
         Qdrant[(Qdrant Vector DB)] <-->|Semantic Search| FastAPI
-        LangGraph[LangGraph Multi-Agent] <-->|State & Tool Execution| FastAPI
+        LangGraph[LangGraph Multi-Agent Supervisor] <-->|State & Tool Execution| FastAPI
         Redis <-->|Rate Limit & Cache Session| FastAPI
     end
 
@@ -130,6 +130,41 @@ from dags.etl_scheduler import dag
 ```
 
 > Triển khai thật nằm trong `jobs/spark_etl.py` và `dags/etl_scheduler.py`; roadmap chỉ giữ snippet ngắn để tránh tài liệu bị lệch khỏi code khi pipeline phát triển.
+
+#### Cài Airflow Để Chạy DAG
+
+`dags/etl_scheduler.py` import `airflow` ở top-level nên chỉ parse được ở môi
+trường có Airflow. Airflow kéo theo dependency tree lớn và hay xung đột pin với
+MLflow/Spark, nên nó nằm ở file riêng `requirements-airflow.txt` và **nên cài
+vào env tách biệt**:
+
+```bash
+python -m venv .venv-airflow
+.venv-airflow/bin/pip install -r requirements-airflow.txt
+```
+
+Kiểm thử DAG (tự skip sạch nếu chưa cài Airflow):
+
+```bash
+python -m pytest tests/test_dag_phase2.py -v
+```
+
+Hoặc chạy Airflow thật bằng Docker (profile riêng, không khởi động cùng stack API):
+
+```bash
+docker compose --profile airflow up -d airflow
+docker compose --profile airflow exec -T airflow airflow dags list
+docker compose --profile airflow exec -T airflow airflow dags list-import-errors
+```
+
+UI ở `http://localhost:8080`, mật khẩu in trong log container. Kiểm chứng đã
+chạy: DAG `smartshop_daily_etl` parse sạch, `list-import-errors` trả
+`No data found`, và có đủ 2 task `materialize_amazon_reviews_2023_local` >>
+`run_spark_etl_job_local`.
+
+> `airflow standalone` dùng SQLite + SequentialExecutor — đủ để học và trigger
+> DAG, **không phải** cấu hình production (production cần Postgres và executor
+> thật như Celery/Kubernetes executor).
 
 #### Ghi Chú Chạy Phase 2 Bằng Ubuntu WSL Trên Windows
 
@@ -247,6 +282,22 @@ python -m src.model_registry promote \
   --source-alias candidate \
   --alias champion
 ```
+
+**Quality gate.** `promote` so metric của candidate với champion đương nhiệm
+trước khi đổi alias. Trước đây lệnh này gắn `champion` **vô điều kiện** — một
+model train trên batch lỗi có thể chiếm production chỉ bằng một câu lệnh.
+
+```bash
+# Yêu cầu candidate phải hơn champion ít nhất 0.01 f1
+python -m src.model_registry promote \
+  --source-alias candidate --alias champion \
+  --gate-metric f1_score --min-delta 0.01
+```
+
+* Chưa có champion → cho promote (lần đầu).
+* Candidate kém hơn → **chặn**, exit code 1, không đổi alias.
+* Thiếu metric để so → chặn (không đoán mò).
+* `--force` để ghi đè khi thực sự cần.
 
 Các phase sau có thể load model production bằng URI:
 
@@ -478,6 +529,28 @@ Kiem thu Phase 5 khong can Kafka/Redis that:
 python -m pytest tests/test_streaming_phase5.py
 ```
 
+#### Đóng Vòng Clickstream: Từ Click Đến Gợi Ý
+
+Bảng xếp hạng hot-products trước đây chỉ được **ghi** mà không ai đọc. Vòng
+hoàn chỉnh hiện tại:
+
+```
+POST /events/click → Kafka (topic user-clicks) → click-consumer
+    → Redis sorted set → GET /products/hot
+                       → GET /recommendations  (similarity × popularity)
+```
+
+* `GET /products/hot?limit=N` — top sản phẩm theo lượt click thật.
+* `GET /recommendations?query=...&popularity_weight=0.3` — trộn **hai tín
+  hiệu**: vector similarity (biết cái gì khớp yêu cầu) và click popularity
+  (biết cái gì đang được quan tâm). Click count được chuẩn hoá về 0..1 nên
+  `popularity_weight` có ý nghĩa như nhau bất kể lưu lượng tuyệt đối.
+* Không có `query` → chỉ trending (`strategy: popularity`). Redis chết →
+  tự động lùi về similarity thuần (`strategy: similarity`) thay vì lỗi.
+
+Kiểm chứng thật đã chạy: sản phẩm có similarity **thấp hơn** (0.082 so với
+0.088) nhưng có 8 click thật đã vượt lên hạng 1 khi `popularity_weight=0.5`.
+
 ---
 
 ### Phase 6: Cache, Session & Queue Layer
@@ -574,7 +647,7 @@ python -m pytest tests/test_cache_service_phase6.py
 ### Phase 7: AI Agent Framework Development
 **Mục tiêu**: Xây dựng AI Agent hỗ trợ khách hàng đa năng: có khả năng gọi tool tìm kiếm sản phẩm (Qdrant), trả lời chính sách mua hàng, và hỗ trợ chuyển tiếp lên người thật (Human-in-the-loop) khi gặp trường hợp phức tạp.
 
-*   **Công nghệ sử dụng**: LangGraph (Multi-Agent, Tool Calling, Stateful).
+*   **Công nghệ sử dụng**: LangGraph (Multi-Agent, Tool Calling, Stateful, Human-in-the-loop).
 *   **Các bước thực hiện**:
     1. Định nghĩa trạng thái hội thoại (State) chứa lịch sử tin nhắn và cờ trạng thái.
     2. Tạo các Tools: `search_products_tool` để truy vấn vector Qdrant.
@@ -658,6 +731,64 @@ workflow.add_edge("human_check", "agent")
 app = workflow.compile()
 ```
 
+#### Ghi Chú Triển Khai Phase 7 Trong Repo
+
+Đoạn code phía trên là minh họa khái niệm. Hiện thực thật nằm trong
+`src/agent.py`.
+
+**Kiến trúc multi-agent.** Một `SupervisorAgent` định tuyến, rồi giao việc cho
+specialist sở hữu domain đó — mỗi specialist là một node riêng trong graph:
+
+```
+supervisor ──┬─→ product_agent   (tool: search_products)
+             ├─→ policy_agent    (tool: retrieve_policy, trích nguồn)
+             ├─→ request_human_review  ← interrupt point
+             ├─→ support_agent   (handoff cho người thật)
+             └─→ fallback_agent
+```
+
+Supervisor route **một lần**; specialist thực thi quyết định đó. Trace của mỗi
+lượt có event `delegate` ghi rõ agent nào đã xử lý, và graph state có field
+`agent`.
+
+**Vòng lặp agentic (quan trọng nhất).** `run_tool_loop` chạy
+`tool → LLM → answer`: sau khi tool trả kết quả, LLM **nhìn thấy kết quả đó**
+và tự viết câu trả lời, thay vì chỉ chọn tool rồi in kết quả bằng template.
+LLM có thể gọi tool thêm lần nữa nếu kết quả đầu chưa tốt, giới hạn bằng
+`max_tool_iterations` (mặc định 3) để không lặp vô hạn. Khi không có LLM, hệ
+thống quay về template deterministic — nên test không cần API key.
+
+Các điểm khác biệt còn lại so với snippet minh họa:
+
+* `SmartShopAgent.decide_with_history` định tuyến (LLM tool-calling nếu có
+  `OPENAI_API_KEY`, nếu không thì keyword fallback), còn
+  `SmartShopAgent.execute_decision` thực thi quyết định đó. Tách đôi để node
+  trong graph **không định tuyến lại lần hai** — nếu gộp thì mỗi lượt chat sẽ
+  tốn 2 lần gọi LLM.
+* `build_langgraph_app` compile graph **có checkpointer** (`MemorySaver` mặc
+  định, có thể inject `SqliteSaver`), nên gọi lại cùng `thread_id` sẽ tiếp tục
+  hội thoại đã lưu thay vì chạy lại từ đầu.
+* `interrupt_before=["request_human_review"]` khiến graph **dừng thật** trước
+  khi vào node human review, đúng nghĩa Human-in-the-loop.
+* State trong graph chỉ chứa kiểu JSON thuần (dict/list/str). Không nhét
+  dataclass vào state — checkpointer phải serialize nó, và LangGraph sẽ chặn
+  các kiểu chưa đăng ký ở version sau.
+* `/chat` và `/chat/stream` chạy qua graph này (`SMARTSHOP_AGENT_USE_GRAPH`,
+  mặc định `true`); nếu môi trường không có `langgraph`, API tự động fallback
+  sang gọi agent trực tiếp.
+
+**Cổng phê duyệt là do server quyết định.** Client gửi `approval_request_id`;
+API đối chiếu với record trong Redis và chỉ mở cổng khi record ở trạng thái
+`approved`, đúng `session_id`, đúng nội dung message, và **chưa từng được dùng**
+(single-use, chống replay). Trường `approved_by_human` do client tự khai chỉ
+còn tác dụng trong `dev`/`local`/`test`.
+
+Kiểm thử Phase 7:
+
+```bash
+python -m pytest tests/test_agent_phase7.py -v
+```
+
 ---
 
 ### Phase 8: API Layer Development
@@ -731,7 +862,16 @@ Phan hien thuc nam trong `src/main.py`, gom:
 
 * `create_app`: FastAPI app factory ho tro inject fake Redis/Qdrant/Agent/ETL runner cho test.
 * `/search`: tim kiem san pham bang Qdrant, cache ket qua bang Redis va ho tro filter `category`, `brand`, `min_price`, `max_price`.
-* `/chat` va `/chat/stream`: Server-Sent Events streaming ket qua tu `SmartShopAgent`, dong thoi luu session memory vao Redis khi co `session_id`.
+* `/chat` va `/chat/stream`: Server-Sent Events streaming **token thật** tu LLM.
+  Agent chay tren worker thread va day tung token vao asyncio queue ngay khi
+  model sinh ra, nen client thay chu trong luc model con dang viet. Truoc day
+  API tinh xong toan bo cau tra loi roi moi `content.split()` — vua khong phai
+  streaming, vua lam mat xuong dong. Duong rule-based (khong co LLM) khong co
+  token de stream nen fallback cat theo **dong**, giu nguyen `\n`.
+  Thu tu event: `start` (bao da bat dau) → nhieu `chunk` → `done` (chua
+  `action`, `requires_human_review`, `approval_request_id`, `tool_outputs`).
+  `action` chi co o `done` vi routing chua xong luc `start` duoc gui.
+* `/products/hot` va `/recommendations`: xem phan Phase 5.
 * `/upload` va `/catalog/upload`: nhan file CSV catalog, luu vao `data/uploads/catalog`, tao manifest va chay ETL background qua `jobs.spark_etl` hoac command duoc cau hinh bang `SMARTSHOP_ETL_COMMAND`.
 * CORS cau hinh qua `SMARTSHOP_CORS_ORIGINS` de frontend that goi API an toan, khong dung wildcard mac dinh.
 * Authentication bang Bearer JWT voi issuer/JWKS/public key RS256 cho production; HS256 secret chi la fallback dev/local/test.
@@ -992,7 +1132,22 @@ Phần hiện thực nằm trong các file:
 * `docker-compose.yml`: thêm service `prometheus` (port `9090`) và `grafana` (port `3000`).
 * `monitoring/prometheus.yml`: cấu hình scrape `smartshop-api` tại `/metrics` mỗi 10 giây.
 * `monitoring/grafana/provisioning/datasources/prometheus.yml`: auto-provision Prometheus datasource.
-* `monitoring/grafana/provisioning/dashboards/smartshop_dashboard.json`: dashboard sẵn sàng với panels: Request Rate, Error Rate, P95 Latency, Search Cache Hit Rate, LLM Token Usage, LLM Latency.
+* `monitoring/grafana/provisioning/dashboards/smartshop_dashboard.json`: dashboard sẵn sàng với panels: Request Rate, Error Rate, P95 Latency, Search Cache Hit Rate, LLM Token Usage, LLM Latency, Agent Routing Mode, Kafka Click Throughput.
+
+Các business metric được ghi tại chỗ nào:
+
+| Metric | Ghi ở đâu |
+|---|---|
+| `smartshop_search_requests_total{source}` / `_latency_seconds` | handler `/search` (`cache` / `vector_store` / `error`) |
+| `smartshop_click_events_total{status}` | handler `/events/click` |
+| `smartshop_agent_decisions_total{action,mode}` | `/chat`; `mode` = `llm` hoặc `rules` |
+| `smartshop_llm_*`, `smartshop_chat_requests_total` | `/chat` qua `record_llm_call` |
+| `smartshop_catalog_uploads_total{status}` | `/upload` |
+
+> Label `mode` tồn tại vì agent **tự động tụt xuống keyword routing** khi LLM
+> lỗi (hết quota, sai API key) và chỉ log WARNING. Nếu không tách metric thì
+> một agent đã hỏng trông y hệt một agent khỏe trên dashboard. Alert
+> `AgentDegradedToRuleBasedRouting` bắt đúng trường hợp này.
 
 Dựng toàn bộ stack bao gồm Prometheus và Grafana:
 
@@ -1018,6 +1173,18 @@ LANGFUSE_HOST=https://cloud.langfuse.com   # hoặc self-hosted
 ```
 
 Neu `LANGFUSE_PUBLIC_KEY` hoac `LANGFUSE_SECRET_KEY` bi bo trong, `LangfuseTracer` se tu tat tracing va API van chay binh thuong. Chi khi co key that thi trace LLM moi duoc gui len Langfuse.
+
+> **Phiên bản SDK — đã từng gây lỗi im lặng.** Code dùng API **Langfuse v4**
+> (`start_observation(as_type="generation")`, `propagate_attributes`). Bản v3
+> đã xoá `client.generation()` và `langfuse.decorators` của v2. Trước đây
+> requirements ghi `langfuse>=2.0.0` không chặn trên, nên pip cài v4 và **mọi
+> trace đều thất bại** — nhưng tracer vẫn tự báo `is_enabled = True` và lỗi bị
+> nuốt thành WARNING, nên dashboard trống mà không ai biết.
+>
+> Đã sửa: pin `langfuse>=4.0.0,<5.0.0`, và `LangfuseTracer` kiểm tra SDK có
+> `start_observation` ngay lúc khởi tạo — SDK sai phiên bản thì **tắt hẳn và
+> log ERROR** thay vì giả vờ hoạt động. `tracer.last_error` cho biết lỗi gần
+> nhất. Test `TestInstalledLangfuseSdkSurface` canh cho việc nâng version.
 Docker Compose se doc `.env` va truyen cac bien nay vao container API. Neu chay local bang `uvicorn --reload`, hay export bien moi truong trong shell hoac chay `uvicorn src.main:app --reload --env-file .env`.
 
 Luu y ve Grafana dashboard:
@@ -1064,7 +1231,24 @@ Các thay đổi nâng dự án từ demo local lên gần production-ready:
 
 * CI đẩy image lên **GHCR** với tag `sha-<commit>` + `latest` khi merge vào `main` (job `publish-image`); production nên pin tag sha.
 * `k8s/ingress.yaml`: Ingress NGINX + cert-manager TLS (đổi host/issuer theo cluster); Service API chuyển sang ClusterIP.
-* `monitoring/alert_rules.yml`: alert cho target down, 5xx > 5%, P95 > 2s, cache hit thấp, LLM chậm.
+* `monitoring/alert_rules.yml`: alert cho target down, 5xx > 5%, P95 > 2s, cache hit thấp, LLM chậm, và agent tụt xuống keyword routing.
+* `monitoring/alertmanager.yml` + service `alertmanager` (port `9093`):
+  Prometheus **thật sự gửi** alert sang Alertmanager (trước đây block
+  `alerting:` bị comment nên rule chỉ evaluate rồi thôi). Có route riêng cho
+  `severity=critical` và inhibit rule để `ApiTargetDown` không kéo theo một
+  loạt alert hệ quả.
+
+  Kiểm chứng đã chạy: dừng container `api` → `ApiTargetDown` chuyển `firing`
+  trong Prometheus và xuất hiện `active` trong Alertmanager.
+
+  ```bash
+  docker compose stop api && sleep 90
+  curl -s localhost:9093/api/v2/alerts | grep alertname
+  ```
+
+  > Receiver mặc định không gắn notifier nào (để stack local chạy không cần
+  > secret) — alert hiện ở UI `http://localhost:9093`. Production cần thêm
+  > `slack_configs` / `email_configs` / PagerDuty vào receiver.
 * Redis hỗ trợ password qua `REDIS_PASSWORD` (Secret `smartshop-api-secret/redis-password` trong K8s).
 * Structured logging: JSON logs ngoài dev (`SMARTSHOP_JSON_LOGS`), request-ID tự sinh/lan truyền qua header `X-Request-ID`.
 * Dev tools pin version trong `requirements-dev.txt` để CI không vỡ khi black đổi style.
@@ -1075,10 +1259,13 @@ Các thay đổi nâng dự án từ demo local lên gần production-ready:
 
 Để chạy thử toàn bộ mô hình này trên máy của bạn (Local Development) mà không cần setup mây phức tạp:
 
-1.  **Clone Project & Cấu hình Docker**: Dựng sẵn toàn bộ hạ tầng (Kafka, Redis, Qdrant, Prometheus, Grafana, MLflow) chỉ với một dòng lệnh:
+1.  **Clone Project & Cấu hình Docker**: Dựng hạ tầng (API, Kafka, Redis, Qdrant, Prometheus, Grafana, click-consumer) chỉ với một dòng lệnh:
     ```bash
-    docker-compose up -d
+    docker compose up -d
     ```
+    > MLflow **không** nằm trong Compose. Phase 3 chạy local với backend store
+    > `sqlite:///mlflow.db` và artifact store `mlruns/`; mở UI riêng bằng
+    > `mlflow ui --backend-store-uri sqlite:///mlflow.db`.
 2.  **Khởi chạy ETL Job**: Chạy script Spark cục bộ hoặc trên Databricks Community Edition để xử lý file Amazon Product thô.
 3.  **Tạo Vector Database**: Chạy script `vector_store.py` để nhúng (embed) sản phẩm vào Qdrant.
 4.  **Chạy Web Server FastAPI**:

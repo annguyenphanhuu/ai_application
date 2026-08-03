@@ -24,14 +24,16 @@ or explain the project end to end.
 | Concern | Tool | Main files |
 | --- | --- | --- |
 | Raw data ingest | Hugging Face / requests | `jobs/amazon_reviews_2023.py` |
-| Batch ETL | Spark / Delta-capable pipeline | `jobs/spark_etl.py`, `dags/etl_scheduler.py` |
+| Batch ETL | Spark / Delta-capable pipeline | `jobs/spark_etl.py` |
+| Orchestration | Airflow (separate env, see `requirements-airflow.txt`) | `dags/etl_scheduler.py` |
 | Training and registry | scikit-learn / MLflow | `src/train.py`, `src/model_registry.py` |
 | Vector search | Qdrant | `src/vector_store.py` |
 | Cache, rate limit, state | Redis | `src/cache_service.py` |
 | Clickstream | Kafka | `src/streaming.py` |
-| Agent workflow | LangChain/LangGraph-style tool flow | `src/agent.py` |
+| Agent workflow | LangGraph multi-agent supervisor + tool loop (checkpointer, human-review interrupt) | `src/agent.py` |
+| Recommendations | Vector similarity blended with Kafka/Redis click popularity | `src/main.py`, `src/streaming.py` |
 | API | FastAPI | `src/main.py` |
-| Observability | Prometheus, Grafana, Langfuse | `src/monitoring.py`, `monitoring/` |
+| Observability | Prometheus, Grafana, Alertmanager, Langfuse | `src/monitoring.py`, `monitoring/` |
 | Deployment | Docker Compose, Kubernetes | `Dockerfile`, `docker-compose.yml`, `k8s/` |
 
 ## Local Development
@@ -191,7 +193,11 @@ When the Docker Compose stack is running:
 
 - FastAPI metrics: <http://localhost:8000/metrics>
 - Prometheus: <http://localhost:9090>
+- Alertmanager: <http://localhost:9093> (receives fired alerts; the default
+  receiver has no notifier, so add Slack/email/PagerDuty per environment)
 - Grafana: <http://localhost:3000> with `admin/admin` by default
+- Airflow (separate profile): `docker compose --profile airflow up -d airflow`,
+  then <http://localhost:8080>
 
 To enable Langfuse, put real keys in `.env`:
 
@@ -216,6 +222,68 @@ If keys are missing, Langfuse tracing disables itself and the API keeps running.
   budgets, and managed Kafka or a Kafka operator.
 - The API can trigger ETL, but a serious deployment should run ETL/training in a
   worker image or orchestrated job rather than inside the API container.
+- Pin the CI-published image tag (`ghcr.io/<owner>/smartshop-api:sha-<commit>`)
+  in `k8s/kustomization.yaml` before deploying. `latest` makes the running
+  version unknowable and breaks rollback.
+
+### Human-in-the-loop approvals
+
+Sensitive turns (refunds, chargebacks, legal) are routed to human review and
+queued in Redis. Approval is decided **by the server**, never by the caller:
+
+1. `/chat` returns `requires_human_review: true` with an `approval_request_id`.
+2. A reviewer holding `approvals:write` resolves it via
+   `POST /approvals/{id}/resolve`.
+3. The client resends the **same message in the same session**, passing
+   `approval_request_id`. The API redeems it only if the record is `approved`,
+   matches that session and message, and has not been redeemed before
+   (single-use, so one approval cannot be replayed on later turns).
+
+The legacy `approved_by_human` request field is a client assertion and proves
+nothing; it is honoured only when `SMARTSHOP_ENV` is `dev`/`local`/`test` and
+ignored (with a warning) everywhere else.
+
+### Agent architecture
+
+A `SupervisorAgent` routes each turn once, then hands it to the specialist that
+owns the domain — `product_agent`, `policy_agent`, `support_agent`, or
+`fallback_agent`. Each is its own LangGraph node, and `request_human_review` is
+an interrupt point so the run genuinely halts for a reviewer.
+
+Tool calls run a real loop: `run_tool_loop` feeds the tool result back to the
+LLM so it answers *from* the data and can re-query when the first result is
+poor, bounded by `max_tool_iterations`. Without an LLM the agent falls back to
+deterministic templates, which is why the test suite needs no API key.
+
+### Streaming
+
+`/chat` streams real LLM tokens: the agent runs on a worker thread and pushes
+each token into an asyncio queue as the model produces it. Event order is
+`start` → many `chunk` → `done`; `action` and `approval_request_id` are on
+`done` because routing has not finished when `start` is sent. Rule-based
+answers have no tokens to stream and are emitted line by line, preserving the
+newlines in product listings.
+
+### Model promotion gate
+
+`python -m src.model_registry promote` compares the candidate against the
+incumbent champion before repointing the alias, and exits non-zero if the
+candidate regresses. Use `--gate-metric`, `--min-delta`, and `--force`.
+
+### Langfuse SDK version
+
+`src/monitoring.py` targets the **v4** API (`start_observation`,
+`propagate_attributes`). v3 removed the v2 calls this used to make, and an
+unpinned `langfuse>=2.0.0` let v4 install and silently drop every trace while
+reporting itself enabled. It is now pinned `>=4,<5`, and the tracer refuses to
+start on an SDK without `start_observation` rather than failing quietly.
+
+### Agent routing mode
+
+The agent silently degrades to keyword routing when the LLM is unreachable or
+`OPENAI_API_KEY` is invalid. Watch the `mode` label on
+`smartshop_agent_decisions_total` (Grafana panel "Agent Routing Mode", alert
+`AgentDegradedToRuleBasedRouting`) — otherwise a broken agent looks healthy.
 
 ## Troubleshooting
 
