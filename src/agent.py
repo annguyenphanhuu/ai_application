@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol, Sequence, TypedDict
 
@@ -109,6 +109,18 @@ class AgentState(TypedDict, total=False):
     reason: str
     content: str
     requires_human_review: bool
+    # Routing decision handed from the router node to the action node so the
+    # action node does not re-route (and re-call the LLM).  Stored as a plain
+    # dict: everything in graph state gets serialised by the checkpointer, and
+    # custom classes there are unportable across langgraph versions.
+    decision: dict[str, Any] | None
+    # Trace events of the current turn, as dicts for the same reason.
+    trace_events: list[dict[str, Any]]
+    # Monotonic turn counter, so a caller can tell this turn's result apart
+    # from a previous turn's leftovers in the same thread.
+    turn: int
+    # Name of the specialist that handled the turn (multi-agent routing).
+    agent: str
 
 
 @dataclass(frozen=True)
@@ -140,6 +152,10 @@ class AgentConfig:
     )
     llm_timeout_seconds: float = 30.0
     allow_rule_based_fallback: bool = True
+    # How many tool -> LLM rounds one turn may take. 1 means "call the tool
+    # once, then let the LLM write the answer from the result". Higher values
+    # let the agent refine its own query when the first result is poor.
+    max_tool_iterations: int = 3
     policy_topics: dict[str, str] = field(
         default_factory=lambda: dict(DEFAULT_POLICY_TOPICS)
     )
@@ -158,6 +174,14 @@ class AgentDecision:
     llm_model: str | None = None
     llm_latency_seconds: float = 0.0
     llm_usage: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SimpleAIMessage:
+    """Minimal stand-in used when streamed chunks cannot be merged."""
+
+    content: str
+    tool_calls: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -488,6 +512,62 @@ class SmartShopAgent:
         messages.append({"role": "user", "content": message})
         return messages
 
+    def _synthesis_conversation(
+        self,
+        message: str,
+        history: Sequence[dict[str, Any]] | None,
+        exchanges: Sequence[dict[str, Any]],
+    ) -> list[dict[str, str]]:
+        """Build the prompt that lets the LLM answer *from* tool results.
+
+        The routing prompt asks "which tool?"; this one asks "given what the
+        tool returned, what do we tell the customer?".  Tool output is rendered
+        as JSON in a user-visible turn because the raw catalog rows carry
+        details (price, score) the model should be able to reference.
+        """
+        system = (
+            "You are SmartShop's customer-support agent. Answer the customer "
+            "using ONLY the tool results provided. Be concise and specific: "
+            "mention product titles and prices when relevant, and never invent "
+            "products, prices, or policies that are not in the results. If the "
+            "results do not answer the question, say so plainly. If a different "
+            "search would clearly help, you may call a tool once more."
+        )
+        messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+        for row in history or []:
+            role = str(row.get("role", "user"))
+            content = str(row.get("content", ""))
+            if role in {"user", "assistant"} and content:
+                messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": message})
+        for exchange in exchanges:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"Result of {exchange['tool']}"
+                        f"({json.dumps(exchange['args'], ensure_ascii=False)}):\n"
+                        f"{json.dumps(exchange['result'], ensure_ascii=False, default=str)}"
+                    ),
+                }
+            )
+        return messages
+
+    def _run_tool(self, tool_name: str, args: dict[str, Any]) -> Any:
+        """Execute one tool by name and return its raw result."""
+        if tool_name == "search_products":
+            query = str(args.get("query") or "")
+            top_k = int(args.get("top_k") or self.config.top_k)
+            return self.search_tool.run(query, top_k=top_k)
+        if tool_name == "retrieve_policy":
+            topic = str(args.get("topic") or "").strip().lower().replace(" ", "-")
+            document = self.policy_source.get(topic) if topic else None
+            if document is None:
+                matches = self.policy_source.search(str(args.get("query") or ""))
+                document = matches[0] if matches else None
+            return document.to_dict() if document else None
+        raise ValueError(f"unknown tool: {tool_name}")
+
     def _first_tool_call(self, ai_message: Any) -> tuple[str | None, dict[str, Any]]:
         tool_calls = getattr(ai_message, "tool_calls", None) or []
         if not tool_calls:
@@ -607,6 +687,155 @@ class SmartShopAgent:
             reason="LLM did not select a supported tool.",
         )
 
+    def run_tool_loop(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        message: str,
+        history: Sequence[dict[str, Any]] | None,
+        trace_events: list[AgentTraceEvent],
+        on_token: Any = None,
+    ) -> tuple[Any, list[dict[str, Any]], str | None]:
+        """Run tool -> LLM -> (optional another tool) -> answer.
+
+        This is the loop that makes the agent an agent: without it the LLM
+        picks a tool and never sees what came back, so it cannot summarise,
+        recover from an empty result, or refine its own query.
+
+        Returns ``(last_tool_result, tool_outputs, answer)``. ``answer`` is None
+        when there is no LLM available, in which case the caller falls back to
+        deterministic template formatting.
+        """
+        exchanges: list[dict[str, Any]] = []
+        tool_outputs: list[dict[str, Any]] = []
+        last_result: Any = None
+
+        for iteration in range(max(1, self.config.max_tool_iterations)):
+            start = time.perf_counter()
+            try:
+                last_result = self._run_tool(tool_name, tool_args)
+                status = "ok"
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("tool %s failed: %s", tool_name, exc)
+                last_result = None
+                status = "error"
+            trace_events.append(
+                AgentTraceEvent(
+                    event="tool_call",
+                    action=tool_name,
+                    tool=tool_name,
+                    status=status,
+                    latency_seconds=time.perf_counter() - start,
+                    metadata={"iteration": iteration, **tool_args},
+                )
+            )
+            exchanges.append(
+                {"tool": tool_name, "args": dict(tool_args), "result": last_result}
+            )
+            tool_outputs.append(
+                {"tool": tool_name, "args": dict(tool_args), "result": last_result}
+            )
+
+            if self.llm_with_tools is None:
+                # No LLM: the caller formats the raw result with a template.
+                return last_result, tool_outputs, None
+
+            answer, next_call = self._synthesize(
+                message, history, exchanges, trace_events, on_token=on_token
+            )
+            if next_call is None:
+                return last_result, tool_outputs, answer
+
+            next_name, next_args = next_call
+            if next_name not in {"search_products", "retrieve_policy"}:
+                return last_result, tool_outputs, answer
+            tool_name, tool_args = next_name, next_args
+
+        # Iteration budget exhausted: answer from what we already have.
+        answer, _ = self._synthesize(
+            message, history, exchanges, trace_events, on_token=on_token
+        )
+        return last_result, tool_outputs, answer
+
+    def _invoke_llm(self, messages: list[dict[str, str]], on_token: Any = None) -> Any:
+        """Call the LLM, streaming tokens to *on_token* when possible.
+
+        Streaming is safe to use for synthesis because a model that decides to
+        call a tool emits little or no content -- so anything streamed here is
+        the answer text, not something that will be discarded.  Falls back to a
+        plain invoke when no callback is given or the client cannot stream.
+        """
+        if on_token is None or not hasattr(self.llm_with_tools, "stream"):
+            return self.llm_with_tools.invoke(messages)
+
+        import functools
+        import operator
+
+        chunks = []
+        for chunk in self.llm_with_tools.stream(messages):
+            text = getattr(chunk, "content", "") or ""
+            if text:
+                on_token(text)
+            chunks.append(chunk)
+        if not chunks:
+            return self.llm_with_tools.invoke(messages)
+        try:
+            return functools.reduce(operator.add, chunks)
+        except TypeError:
+            # Chunks that do not support merging: rebuild a minimal message.
+            return SimpleAIMessage(
+                content="".join(getattr(c, "content", "") or "" for c in chunks)
+            )
+
+    def _synthesize(
+        self,
+        message: str,
+        history: Sequence[dict[str, Any]] | None,
+        exchanges: Sequence[dict[str, Any]],
+        trace_events: list[AgentTraceEvent],
+        on_token: Any = None,
+    ) -> tuple[str | None, tuple[str, dict[str, Any]] | None]:
+        """One LLM call over the tool results. Returns (answer, next_tool_call)."""
+        if self.llm_with_tools is None:
+            return None, None
+
+        start = time.perf_counter()
+        try:
+            ai_message = self._invoke_llm(
+                self._synthesis_conversation(message, history, exchanges),
+                on_token=on_token,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if self.config.allow_rule_based_fallback:
+                logger.warning("LLM synthesis failed; using template answer: %s", exc)
+                return None, None
+            raise
+
+        elapsed = time.perf_counter() - start
+        usage = self._extract_llm_usage(ai_message)
+        trace_events.append(
+            AgentTraceEvent(
+                event="llm_call",
+                action="synthesize",
+                latency_seconds=elapsed,
+                metadata={
+                    "model": self.config.llm_model,
+                    "prompt_tokens": usage.get("prompt_tokens", 0),
+                    "completion_tokens": usage.get("completion_tokens", 0),
+                    "input_text": message,
+                },
+            )
+        )
+
+        tool_name, tool_args = self._first_tool_call(ai_message)
+        content = getattr(ai_message, "content", None)
+        answer = (
+            content.strip() if isinstance(content, str) and content.strip() else None
+        )
+        if tool_name:
+            return answer, (tool_name, tool_args)
+        return answer, None
+
     def decide(self, message: str, approved_by_human: bool = False) -> AgentDecision:
         return self.decide_with_history(message, None, approved_by_human)
 
@@ -667,15 +896,34 @@ class SmartShopAgent:
         message: str,
         history: Sequence[dict[str, Any]] | None = None,
         approved_by_human: bool = False,
+        on_token: Any = None,
     ) -> AgentResponse:
-        user_message = {"role": "user", "content": message}
-        messages = list(history or []) + [user_message]
-        trace_events: list[AgentTraceEvent] = []
+        """Route *message* and execute the resulting decision."""
         decision = self.decide_with_history(
             message,
             history=history,
             approved_by_human=approved_by_human,
         )
+        return self.execute_decision(
+            decision, message, history=history, on_token=on_token
+        )
+
+    def execute_decision(
+        self,
+        decision: AgentDecision,
+        message: str,
+        history: Sequence[dict[str, Any]] | None = None,
+        on_token: Any = None,
+    ) -> AgentResponse:
+        """Carry out an already-made routing decision.
+
+        Split out of ``handle_message`` so the LangGraph nodes can act on the
+        decision the router node already produced, instead of re-routing (and,
+        with a real LLM, paying for a second call) inside every node.
+        """
+        user_message = {"role": "user", "content": message}
+        messages = list(history or []) + [user_message]
+        trace_events: list[AgentTraceEvent] = []
         if decision.llm_model:
             trace_events.append(
                 AgentTraceEvent(
@@ -714,12 +962,35 @@ class SmartShopAgent:
                     str(decision.tool_args.get("query") or message)
                 )
                 document = matches[0] if matches else None
-            content = format_policy_answer(document)
+
+            tool_outputs: list[dict[str, Any]] = []
+            answer: str | None = None
+            if self.llm_with_tools is not None:
+                _result, tool_outputs, answer = self.run_tool_loop(
+                    "retrieve_policy",
+                    {
+                        "topic": decision.policy_topic or "",
+                        "query": str(decision.tool_args.get("query") or message),
+                    },
+                    message,
+                    history,
+                    trace_events,
+                )
+            if answer:
+                # Keep provenance on synthesised answers. A support agent that
+                # paraphrases policy without citing the source leaves the reader
+                # unable to check it.
+                content = answer
+                if document is not None and document.source not in content:
+                    content = f"{content}\n\nSource: {document.source}"
+            else:
+                content = format_policy_answer(document)
             messages.append({"role": "assistant", "content": content})
             return AgentResponse(
                 content=content,
                 action=decision.action,
                 messages=messages,
+                tool_outputs=tool_outputs,
                 reason=decision.reason,
                 trace_events=trace_events,
             )
@@ -727,19 +998,18 @@ class SmartShopAgent:
         if decision.action == "search_products":
             query = str(decision.tool_args.get("query") or message)
             top_k = int(decision.tool_args.get("top_k") or self.config.top_k)
-            start = time.perf_counter()
-            hits = self.search_tool.run(query, top_k=top_k)
-            trace_events.append(
-                AgentTraceEvent(
-                    event="tool_call",
-                    action=decision.action,
-                    tool="search_products",
-                    latency_seconds=time.perf_counter() - start,
-                    metadata={"top_k": top_k},
-                )
+            hits, tool_outputs, answer = self.run_tool_loop(
+                "search_products",
+                {"query": query, "top_k": top_k},
+                message,
+                history,
+                trace_events,
+                on_token=on_token,
             )
-            content = format_product_hits(hits)
-            tool_output = {"tool": "search_products", "query": query, "hits": hits}
+            hits = hits or []
+            # The LLM answers from the tool result when available; the template
+            # is the deterministic fallback for the no-LLM path.
+            content = answer or format_product_hits(hits)
             messages.extend(
                 [
                     {"role": "tool", "name": "search_products", "content": hits},
@@ -750,7 +1020,7 @@ class SmartShopAgent:
                 content=content,
                 action=decision.action,
                 messages=messages,
-                tool_outputs=[tool_output],
+                tool_outputs=tool_outputs,
                 reason=decision.reason,
                 trace_events=trace_events,
             )
@@ -817,7 +1087,160 @@ class SmartShopAgent:
         }
 
 
-def build_langgraph_app(agent: SmartShopAgent | None = None) -> Any:
+# ---------------------------------------------------------------------------
+# Multi-agent layer: a supervisor delegates to specialists that each own their
+# own tools and prompt.  The specialists share one SmartShopAgent for LLM
+# access and the tool loop, so routing and execution stay in one place, but
+# each is addressable as its own graph node and reports its own name in traces.
+# ---------------------------------------------------------------------------
+
+
+class SpecialistAgent:
+    """Base class for a delegated specialist."""
+
+    name: str = "specialist"
+    #: actions this specialist is responsible for
+    handles: tuple[AgentAction, ...] = ()
+
+    def __init__(self, core: "SmartShopAgent"):
+        self.core = core
+
+    def handle(
+        self,
+        decision: AgentDecision,
+        message: str,
+        history: Sequence[dict[str, Any]] | None = None,
+        on_token: Any = None,
+    ) -> AgentResponse:
+        response = self.core.execute_decision(
+            decision, message, history=history, on_token=on_token
+        )
+        return replace(
+            response,
+            trace_events=[
+                AgentTraceEvent(
+                    event="delegate",
+                    action=decision.action,
+                    metadata={"agent": self.name},
+                ),
+                *response.trace_events,
+            ],
+        )
+
+
+class ProductAgent(SpecialistAgent):
+    """Owns catalog search: runs the search tool and answers from its results."""
+
+    name = "product_agent"
+    handles = ("search_products",)
+
+
+class PolicyAgent(SpecialistAgent):
+    """Owns policy Q&A: retrieves from the policy source and cites it."""
+
+    name = "policy_agent"
+    handles = ("answer_policy",)
+
+
+class SupportAgent(SpecialistAgent):
+    """Owns escalation: human review gating and handoff."""
+
+    name = "support_agent"
+    handles = ("request_human_review", "handoff_to_human")
+
+
+class FallbackAgent(SpecialistAgent):
+    """Handles anything the supervisor could not classify."""
+
+    name = "fallback_agent"
+    handles = ("fallback",)
+
+
+SPECIALIST_CLASSES: tuple[type[SpecialistAgent], ...] = (
+    ProductAgent,
+    PolicyAgent,
+    SupportAgent,
+    FallbackAgent,
+)
+
+
+class SupervisorAgent:
+    """Routes each turn to the specialist that owns the chosen action.
+
+    The supervisor does the routing decision once; the specialist executes it.
+    That keeps exactly one LLM routing call per turn while still giving each
+    domain its own agent boundary.
+    """
+
+    def __init__(self, core: "SmartShopAgent" | None = None):
+        self.core = core or SmartShopAgent()
+        self.specialists: dict[str, SpecialistAgent] = {}
+        self._by_action: dict[str, SpecialistAgent] = {}
+        for specialist_cls in SPECIALIST_CLASSES:
+            specialist = specialist_cls(self.core)
+            self.specialists[specialist.name] = specialist
+            for action in specialist.handles:
+                self._by_action[action] = specialist
+
+    def route(
+        self,
+        message: str,
+        history: Sequence[dict[str, Any]] | None = None,
+        approved_by_human: bool = False,
+    ) -> AgentDecision:
+        return self.core.decide_with_history(
+            message, history=history, approved_by_human=approved_by_human
+        )
+
+    def specialist_for(self, action: str) -> SpecialistAgent:
+        return self._by_action.get(action, self.specialists["fallback_agent"])
+
+    def handle_message(
+        self,
+        message: str,
+        history: Sequence[dict[str, Any]] | None = None,
+        approved_by_human: bool = False,
+        on_token: Any = None,
+    ) -> AgentResponse:
+        decision = self.route(
+            message, history=history, approved_by_human=approved_by_human
+        )
+        specialist = self.specialist_for(decision.action)
+        return specialist.handle(decision, message, history=history, on_token=on_token)
+
+
+# Which specialist node owns each routing action. Human review keeps its own
+# node (rather than sharing support_agent's) so the graph can interrupt on it
+# specifically.
+GRAPH_ACTION_NODES: dict[AgentAction, str] = {
+    "answer_policy": "policy_agent",
+    "search_products": "product_agent",
+    "request_human_review": "request_human_review",
+    "handoff_to_human": "support_agent",
+    "fallback": "fallback_agent",
+}
+
+
+def build_langgraph_app(
+    agent: SmartShopAgent | None = None,
+    checkpointer: Any | None = None,
+    interrupt_before_human_review: bool = True,
+) -> Any:
+    """Compile the Phase 7 conversation graph.
+
+    The graph is stateful: it is compiled with a checkpointer, so invoking it
+    with the same ``thread_id`` resumes the stored conversation instead of
+    starting over.  ``request_human_review`` is an interrupt point, so the run
+    genuinely halts there awaiting a reviewer rather than replying and relying
+    on the client to come back.
+
+    Args:
+        agent: agent whose routing/execution the nodes delegate to.
+        checkpointer: LangGraph checkpointer.  Defaults to an in-process
+            ``MemorySaver``; pass a ``SqliteSaver`` to survive restarts.
+        interrupt_before_human_review: set False to compile a graph that runs
+            straight through, which is easier to drive in tests.
+    """
     try:
         from langgraph.graph import END, StateGraph
     except ImportError as exc:
@@ -826,69 +1249,97 @@ def build_langgraph_app(agent: SmartShopAgent | None = None) -> Any:
             "Install it with `pip install -r requirements.txt` or update environment.yml."
         ) from exc
 
-    agent = agent or SmartShopAgent()
+    if checkpointer is None:
+        from langgraph.checkpoint.memory import MemorySaver
 
-    def route_intent(state: AgentState) -> AgentState:
+        checkpointer = MemorySaver()
+
+    supervisor = SupervisorAgent(agent or SmartShopAgent())
+
+    def _last_user_message(state: AgentState) -> tuple[str, list[dict[str, Any]]]:
         messages = state.get("messages", [])
         if not messages:
             raise ValueError("AgentState.messages must contain at least one message.")
-        last_content = str(messages[-1].get("content", ""))
-        decision = agent.decide(
-            last_content,
+        return str(messages[-1].get("content", "")), list(messages[:-1])
+
+    def route_intent(state: AgentState) -> AgentState:
+        message, history = _last_user_message(state)
+        decision = supervisor.route(
+            message,
+            history=history,
             approved_by_human=bool(state.get("approved_by_human", False)),
         )
+        # Stash the decision so the specialist node can execute it without
+        # routing a second time.
         return {
             **state,
             "next_action": decision.action,
             "reason": decision.reason,
+            "decision": asdict(decision),
+            "agent": supervisor.specialist_for(decision.action).name,
         }
 
-    def answer_policy(state: AgentState) -> AgentState:
-        last_content = str(state["messages"][-1].get("content", ""))
-        response = agent.handle_message(
-            last_content,
-            history=state["messages"][:-1],
-            approved_by_human=bool(state.get("approved_by_human", False)),
-        )
-        return {**state, **response.to_dict(), "next_action": response.action}
+    def _make_specialist_node(node_name: str):
+        # `config` is LangGraph's RunnableConfig; left unannotated because
+        # annotating it as a plain dict makes langgraph emit a warning.
+        def node(state: AgentState, config=None) -> AgentState:  # noqa: ANN001
+            message, history = _last_user_message(state)
+            raw_decision = state.get("decision")
+            if raw_decision is None:
+                decision = supervisor.route(
+                    message,
+                    history=history,
+                    approved_by_human=bool(state.get("approved_by_human", False)),
+                )
+            else:
+                decision = AgentDecision(**raw_decision)
+            specialist = supervisor.specialist_for(decision.action)
+            # The token sink is passed per-invocation via config rather than
+            # stored in state: it is a live callable, and everything in state
+            # gets serialised by the checkpointer.
+            on_token = (config or {}).get("configurable", {}).get("on_token")
+            response = specialist.handle(
+                decision, message, history=history, on_token=on_token
+            )
+            payload = response.to_dict()
+            return {
+                **state,
+                **payload,
+                "next_action": response.action,
+                "agent": specialist.name,
+                "decision": None,
+                "turn": int(state.get("turn", 0)) + 1,
+            }
 
-    def search_products(state: AgentState) -> AgentState:
-        return answer_policy(state)
-
-    def request_human_review(state: AgentState) -> AgentState:
-        return answer_policy(state)
-
-    def fallback(state: AgentState) -> AgentState:
-        return answer_policy(state)
+        node.__name__ = f"{node_name}_node"
+        return node
 
     def choose_node(state: AgentState) -> str:
-        return str(state.get("next_action", "fallback"))
+        # Returns the *action*; add_conditional_edges maps it to the node that
+        # owns it via GRAPH_ACTION_NODES.
+        action = str(state.get("next_action", "fallback"))
+        return action if action in GRAPH_ACTION_NODES else "fallback"
 
     workflow = StateGraph(AgentState)
-    workflow.add_node("route_intent", route_intent)
-    workflow.add_node("answer_policy", answer_policy)
-    workflow.add_node("search_products", search_products)
-    workflow.add_node("request_human_review", request_human_review)
-    workflow.add_node("handoff_to_human", request_human_review)
-    workflow.add_node("fallback", fallback)
-    workflow.set_entry_point("route_intent")
+    workflow.add_node("supervisor", route_intent)
+    # One node per specialist so the graph is inspectable and so the interrupt
+    # can target human review specifically.
+    for node_name in dict.fromkeys(GRAPH_ACTION_NODES.values()):
+        workflow.add_node(node_name, _make_specialist_node(node_name))
+
+    workflow.set_entry_point("supervisor")
     workflow.add_conditional_edges(
-        "route_intent",
+        "supervisor",
         choose_node,
-        {
-            "answer_policy": "answer_policy",
-            "search_products": "search_products",
-            "request_human_review": "request_human_review",
-            "handoff_to_human": "handoff_to_human",
-            "fallback": "fallback",
-        },
+        dict(GRAPH_ACTION_NODES),
     )
-    workflow.add_edge("answer_policy", END)
-    workflow.add_edge("search_products", END)
-    workflow.add_edge("request_human_review", END)
-    workflow.add_edge("handoff_to_human", END)
-    workflow.add_edge("fallback", END)
-    return workflow.compile()
+    for node_name in dict.fromkeys(GRAPH_ACTION_NODES.values()):
+        workflow.add_edge(node_name, END)
+
+    compile_kwargs: dict[str, Any] = {"checkpointer": checkpointer}
+    if interrupt_before_human_review:
+        compile_kwargs["interrupt_before"] = ["request_human_review"]
+    return workflow.compile(**compile_kwargs)
 
 
 def build_parser() -> argparse.ArgumentParser:
