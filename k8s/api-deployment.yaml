@@ -16,6 +16,8 @@ spec:
     spec:
       containers:
         - name: api
+          # Tag is set centrally in kustomization.yaml (`images:`); pin the
+          # CI-published sha tag there for real deploys.
           image: smartshop-api:latest
           imagePullPolicy: IfNotPresent
           ports:
@@ -68,6 +70,8 @@ spec:
                   optional: true
             - name: SMARTSHOP_AGENT_USE_LLM
               value: auto
+            - name: SMARTSHOP_AGENT_USE_GRAPH
+              value: "true"
             - name: SMARTSHOP_OPENAI_MODEL
               value: o4-mini
             - name: SMARTSHOP_POLICY_SOURCE_PATH

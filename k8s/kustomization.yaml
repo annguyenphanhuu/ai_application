@@ -9,3 +9,12 @@ resources:
   - api-hpa.yaml
   - click-consumer.yaml
   - ingress.yaml
+
+# Single place to point every workload at a published image. CI pushes
+# ghcr.io/<owner>/smartshop-api:sha-<commit>; pin that immutable tag for real
+# deploys instead of the local `latest` default:
+#
+#   kustomize edit set image smartshop-api=ghcr.io/<owner>/smartshop-api:sha-<commit>
+images:
+  - name: smartshop-api
+    newTag: latest

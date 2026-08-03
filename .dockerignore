@@ -19,6 +19,9 @@ artifacts
 mlruns
 data/uploads
 data/processed
+# ~18MB of raw dataset that COPY . . would otherwise bake into every image.
+# The vector-indexer reads processed data through a bind mount, not the image.
+data/raw
 dbfs
 .env
 .idea

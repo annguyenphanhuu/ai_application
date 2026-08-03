@@ -3,15 +3,17 @@ global:
   evaluation_interval: 15s   # Evaluate rules mỗi 15 giây
   scrape_timeout: 10s
 
-# Alert rules (điều kiện cảnh báo; cần Alertmanager để gửi notification thật)
+# Alert rules
 rule_files:
   - /etc/prometheus/alert_rules.yml
 
-# Alertmanager (tùy chọn, bỏ qua nếu chưa cần)
-# alerting:
-#   alertmanagers:
-#     - static_configs:
-#         - targets: ['alertmanager:9093']
+# Alertmanager receives fired alerts. Without this block Prometheus evaluates
+# the rules but notifies nobody, which is how the alerting looked "done" while
+# being a dead end.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
 
 scrape_configs:
   # Prometheus tự scrape chính nó
