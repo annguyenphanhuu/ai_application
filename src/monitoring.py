@@ -153,8 +153,11 @@ def _build_custom_metrics() -> dict[str, Any]:
             ),
             "agent_decisions_total": Counter(
                 "smartshop_agent_decisions_total",
-                "Total agent decisions by action.",
-                ["action"],
+                "Total agent decisions by action and routing mode.",
+                # `mode` distinguishes LLM routing from the keyword fallback.
+                # Without it a dead API key looks identical to healthy traffic,
+                # because the agent degrades to keyword matching silently.
+                ["action", "mode"],
                 registry=registry,
             ),
             "agent_tool_calls_total": Counter(
@@ -336,6 +339,7 @@ class LangfuseTracer:
         self.config = config or LangfuseConfig()
         self._client: Any = None
         self._enabled = self.config.enabled
+        self._last_error: str | None = None
         self._init_client()
 
     def _init_client(self) -> None:
@@ -349,12 +353,22 @@ class LangfuseTracer:
                 secret_key=self.config.secret_key,
                 host=self.config.host,
             )
+            # Fail loudly on an incompatible SDK rather than accepting every
+            # call and dropping it. v2/v3 lack start_observation, so without
+            # this check the tracer would report itself enabled forever while
+            # emitting nothing.
+            if not hasattr(self._client, "start_observation"):
+                raise RuntimeError(
+                    "Installed langfuse SDK has no start_observation(); this "
+                    "module targets langfuse>=4,<5. Check your pinned version."
+                )
             logger.info("Langfuse client initialised (host=%s).", self.config.host)
         except ImportError:
             logger.warning("langfuse package not installed; LLM tracing disabled.")
             self._enabled = False
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Langfuse client init failed; LLM tracing disabled: %s", exc)
+            logger.error("Langfuse client init failed; LLM tracing disabled: %s", exc)
+            self._last_error = str(exc)
             self._enabled = False
 
     @property
@@ -385,17 +399,15 @@ class LangfuseTracer:
             import functools
 
             try:
-                from langfuse.decorators import langfuse_context, observe  # type: ignore
+                from langfuse import observe, propagate_attributes  # type: ignore
 
-                @observe()
+                @observe(name=name or fn.__name__)
                 @functools.wraps(fn)
                 async def wrapper(*args: Any, **kwargs: Any) -> Any:
-                    langfuse_context.update_current_trace(
-                        name=name or fn.__name__,
-                        user_id=user_id,
-                        tags=tags or [],
-                    )
-                    return await fn(*args, **kwargs)
+                    # v4 sets trace-level attributes through a context manager
+                    # instead of v2's langfuse_context.update_current_trace.
+                    with propagate_attributes(user_id=user_id, tags=tags or []):
+                        return await fn(*args, **kwargs)
 
                 return wrapper
             except ImportError:
@@ -421,27 +433,54 @@ class LangfuseTracer:
 
         Returns True when the event was handed to the SDK, False when tracing
         is disabled or the SDK call failed (the API keeps running either way).
+
+        Uses the v4 observation API: ``start_observation(as_type="generation")``
+        returns a span that must be ended.  v2's ``client.generation(...)`` and
+        ``langfuse.decorators`` were removed in v3, so this module pins
+        ``langfuse>=4,<5`` -- an unpinned upgrade previously left tracing
+        reporting itself as enabled while silently emitting nothing.
         """
         if not self.is_enabled:
             return False
         try:
-            self._client.generation(
-                name=name,
-                model=model,
-                input=input_text,
-                output=output_text,
-                session_id=session_id,
-                user_id=user_id,
-                usage={"input": prompt_tokens, "output": completion_tokens},
-                metadata={
-                    "latency_seconds": latency_seconds,
-                    **(metadata or {}),
-                },
-            )
+            from langfuse import propagate_attributes  # type: ignore
+
+            usage = {}
+            if prompt_tokens:
+                usage["input"] = prompt_tokens
+            if completion_tokens:
+                usage["output"] = completion_tokens
+            if usage:
+                usage["total"] = prompt_tokens + completion_tokens
+
+            with propagate_attributes(session_id=session_id, user_id=user_id):
+                generation = self._client.start_observation(
+                    name=name,
+                    as_type="generation",
+                    model=model,
+                    input=input_text,
+                    output=output_text,
+                    usage_details=usage or None,
+                    metadata={
+                        "latency_seconds": latency_seconds,
+                        **(metadata or {}),
+                    },
+                )
+                generation.end()
+            self._last_error = None
             return True
         except Exception as exc:  # noqa: BLE001
+            # Record the failure so /health and `python -m src.monitoring status`
+            # can surface "configured but broken", instead of the old behaviour
+            # where a dead SDK looked identical to a healthy one.
+            self._last_error = str(exc)
             logger.warning("Langfuse generation logging failed: %s", exc)
             return False
+
+    @property
+    def last_error(self) -> str | None:
+        """Last Langfuse SDK error, or None if the last call succeeded."""
+        return self._last_error
 
     def flush(self) -> None:
         """Flush pending Langfuse events (call on app shutdown)."""
@@ -547,10 +586,20 @@ class MonitoringService:
             metadata=metadata,
         )
 
-    def record_agent_decision(self, action: str) -> None:
-        """Record one agent routing decision."""
+    def record_agent_decision(self, action: str, mode: str = "rules") -> None:
+        """Record one agent routing decision.
+
+        Args:
+            action: the routing action the agent chose.
+            mode: ``llm`` when an LLM produced the decision, ``rules`` when the
+                keyword fallback did.  Alerting on a drop in ``llm`` is how a
+                silently-degraded agent gets noticed.
+        """
         if "agent_decisions_total" in self._metrics:
-            self._metrics["agent_decisions_total"].labels(action=action).inc()
+            self._metrics["agent_decisions_total"].labels(
+                action=action,
+                mode=mode,
+            ).inc()
 
     def record_agent_tool_call(self, tool: str, status: str = "ok") -> None:
         """Record one agent tool call."""

@@ -7,7 +7,7 @@ import json
 import os
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, Protocol, Sequence
@@ -177,6 +177,7 @@ class HumanApprovalRequest:
     resolved_at: str | None = None
     resolved_by: str | None = None
     note: str | None = None
+    consumed_at: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -205,6 +206,7 @@ class HumanApprovalRequest:
             resolved_at=payload.get("resolved_at"),
             resolved_by=payload.get("resolved_by"),
             note=payload.get("note"),
+            consumed_at=payload.get("consumed_at"),
             metadata=dict(payload.get("metadata") or {}),
         )
 
@@ -613,6 +615,45 @@ return {allowed, math.floor(tokens), reset_after}
         )
         self.client.lrem(self.key("approval", "pending"), 0, request_id)
         return resolved
+
+    def consume_human_approval_request(
+        self,
+        request_id: str,
+        session_id: str,
+        message: str,
+        ttl_seconds: int | None = None,
+    ) -> HumanApprovalRequest | None:
+        """Redeem an approved request exactly once.
+
+        Returns the approval only when it is approved, belongs to *session_id*,
+        was raised for *message*, and has not been redeemed before.  Any other
+        case returns None so the caller keeps treating the turn as unapproved.
+
+        Single-use is what stops a reviewer's one-time "yes" from being replayed
+        by the client on every later turn.
+        """
+        if not request_id.strip():
+            raise ValueError("approval request_id must not be empty.")
+
+        request = self.get_human_approval_request(request_id)
+        if request is None:
+            return None
+        if request.status != "approved" or request.consumed_at is not None:
+            return None
+        if request.session_id != session_id or request.message != message:
+            return None
+
+        consumed = replace(
+            request,
+            consumed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        ttl = ttl_seconds or self.config.session_ttl_seconds
+        self.client.setex(
+            self.key("approval", request_id),
+            ttl,
+            json.dumps(consumed.to_dict(), ensure_ascii=False),
+        )
+        return consumed
 
     def check_rate_limit(
         self,

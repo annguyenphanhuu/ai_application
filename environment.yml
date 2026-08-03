@@ -28,7 +28,12 @@ dependencies:
       - redis>=4.6.0
       - langchain-core>=0.2.0
       - langchain-openai>=0.1.0
-      - langgraph>=0.0.10
+      - langgraph>=0.2.0,<2.0.0
       - huggingface-hub>=0.24.0
       - requests>=2.32.0
       - pyjwt[crypto]>=2.8.0
+      # Phase 10 observability. Kept in sync with requirements-api.txt; the
+      # langfuse upper bound matters because v3 removed the API used here.
+      - prometheus-fastapi-instrumentator>=6.1.0
+      - prometheus-client>=0.19.0
+      - langfuse>=4.0.0,<5.0.0

@@ -49,6 +49,21 @@ groups:
           summary: "Search cache hit rate below 10%"
           description: "Redis search cache is barely used; check cache TTL and key hashing."
 
+      - alert: AgentDegradedToRuleBasedRouting
+        expr: >
+          sum(rate(smartshop_agent_decisions_total{mode="llm"}[10m])) == 0
+          and
+          sum(rate(smartshop_agent_decisions_total[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent is routing without the LLM"
+          description: >
+            Chat traffic is being served entirely by keyword fallback routing.
+            The agent degrades silently on LLM errors, so check OPENAI_API_KEY
+            validity, quota, and SMARTSHOP_AGENT_USE_LLM.
+
       - alert: LLMLatencyHigh
         expr: >
           histogram_quantile(

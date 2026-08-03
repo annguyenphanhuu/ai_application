@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -137,6 +138,24 @@ class FakeCacheService:
         ]
         return resolved
 
+    def consume_human_approval_request(
+        self,
+        request_id,
+        session_id,
+        message,
+        ttl_seconds=None,
+    ):
+        request = self.approvals.get(request_id)
+        if request is None:
+            return None
+        if request.status != "approved" or request.consumed_at is not None:
+            return None
+        if request.session_id != session_id or request.message != message:
+            return None
+        consumed = replace(request, consumed_at="2026-07-08T00:01:00+00:00")
+        self.approvals[request_id] = consumed
+        return consumed
+
     def check_rate_limit(self, identity, limit=None, window_seconds=None):
         self.rate_checks.append(identity)
         return RateLimitResult(
@@ -253,6 +272,7 @@ def build_client(
     upload_dir=None,
     etl_runner=None,
     kafka_producer=None,
+    hot_products_store=None,
 ):
     config = APIConfig(
         environment="test",
@@ -266,8 +286,47 @@ def build_client(
         config=config,
         etl_runner=etl_runner or FakeETLJobRunner(),
         kafka_producer=kafka_producer,
+        # Always inject a store so tests never construct a real Redis client
+        # and wait on connection timeouts.
+        hot_products_store=(
+            hot_products_store
+            if hot_products_store is not None
+            else FakeHotProductsStore([])
+        ),
     )
     return TestClient(app)
+
+
+def test_dependency_overrides_work_on_apps_from_create_app():
+    from src.main import get_hot_products_store
+
+    client = build_client()
+    client.app.dependency_overrides[get_hot_products_store] = lambda: None
+
+    response = client.get("/products/hot", headers=auth_headers())
+
+    # Routes are attached with include_router, so they bind to this app and
+    # honour its overrides. Copying route objects off a module-level app left
+    # them bound to that app and silently ignored overrides here.
+    assert response.json() == {"products": [], "source": "unavailable"}
+
+
+def test_create_app_is_idempotent():
+    from src.main import create_app
+
+    counts = []
+    for _ in range(3):
+        app = create_app(
+            cache_service=FakeCacheService(),
+            search_service=FakeSearchService(),
+            config=APIConfig(environment="test", jwt_secret="test-secret"),
+            etl_runner=FakeETLJobRunner(),
+        )
+        counts.append(len(app.openapi()["paths"]))
+
+    # Repeated calls must not accumulate duplicate routes.
+    assert len(set(counts)) == 1
+    assert counts[0] > 10
 
 
 def test_health_is_public():
@@ -609,6 +668,340 @@ def test_chat_human_review_creates_approval_request():
     assert '"approval_request_id": "A001"' in response.text
     assert cache.pending_approvals == ["A001"]
     assert cache.session_appends[1]["metadata"]["approval_request_id"] == "A001"
+
+
+def review_agent():
+    return SmartShopAgent(
+        config=AgentConfig(use_llm_routing="never"),
+        search_tool=ProductSearchTool(FakeSearchService()),
+    )
+
+
+SENSITIVE_MESSAGE = "I want a refund for a damaged order"
+
+
+def approved_request(cache, session_id="S01", message=SENSITIVE_MESSAGE):
+    approval = cache.create_human_approval_request(session_id, message)
+    cache.resolve_human_approval_request(
+        approval.request_id, approved=True, reviewer="reviewer-1"
+    )
+    return approval
+
+
+def test_client_asserted_approval_is_ignored_outside_dev():
+    cache = FakeCacheService()
+    config = APIConfig(environment="prod", jwt_secret="prod-secret")
+    app = create_app(
+        cache_service=cache,
+        search_service=FakeSearchService(),
+        agent=review_agent(),
+        config=config,
+        etl_runner=FakeETLJobRunner(),
+    )
+    client = TestClient(app)
+    token = create_access_token("admin-user", secret="prod-secret")
+
+    response = client.post(
+        "/chat",
+        json={
+            "message": SENSITIVE_MESSAGE,
+            "session_id": "S01",
+            "approved_by_human": True,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # A self-declared approval must not open the gate; the turn is still
+    # routed to human review and a fresh approval request is queued.
+    assert response.status_code == 200
+    assert '"requires_human_review": true' in response.text
+    assert cache.pending_approvals == ["A001"]
+
+
+def test_approval_request_id_unlocks_the_turn():
+    cache = FakeCacheService()
+    approval = approved_request(cache)
+    client = build_client(cache=cache, agent=review_agent())
+
+    response = client.post(
+        "/chat",
+        json={
+            "message": SENSITIVE_MESSAGE,
+            "session_id": "S01",
+            "approval_request_id": approval.request_id,
+        },
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert '"requires_human_review": false' in response.text
+    assert cache.approvals[approval.request_id].consumed_at is not None
+
+
+def test_approval_request_id_cannot_be_replayed():
+    cache = FakeCacheService()
+    approval = approved_request(cache)
+    client = build_client(cache=cache, agent=review_agent())
+    payload = {
+        "message": SENSITIVE_MESSAGE,
+        "session_id": "S01",
+        "approval_request_id": approval.request_id,
+    }
+
+    first = client.post("/chat", json=payload, headers=auth_headers())
+    second = client.post("/chat", json=payload, headers=auth_headers())
+
+    assert '"requires_human_review": false' in first.text
+    # The reviewer approved once; the second attempt must fall back to review.
+    assert '"requires_human_review": true' in second.text
+
+
+def test_approval_from_another_session_is_rejected():
+    cache = FakeCacheService()
+    approval = approved_request(cache, session_id="S-other")
+    client = build_client(cache=cache, agent=review_agent())
+
+    response = client.post(
+        "/chat",
+        json={
+            "message": SENSITIVE_MESSAGE,
+            "session_id": "S01",
+            "approval_request_id": approval.request_id,
+        },
+        headers=auth_headers(),
+    )
+
+    assert '"requires_human_review": true' in response.text
+
+
+def test_approval_for_a_different_message_is_rejected():
+    cache = FakeCacheService()
+    approval = approved_request(cache, message="something harmless")
+    client = build_client(cache=cache, agent=review_agent())
+
+    response = client.post(
+        "/chat",
+        json={
+            "message": SENSITIVE_MESSAGE,
+            "session_id": "S01",
+            "approval_request_id": approval.request_id,
+        },
+        headers=auth_headers(),
+    )
+
+    assert '"requires_human_review": true' in response.text
+
+
+def test_unresolved_approval_does_not_unlock_the_turn():
+    cache = FakeCacheService()
+    pending = cache.create_human_approval_request("S01", SENSITIVE_MESSAGE)
+    client = build_client(cache=cache, agent=review_agent())
+
+    response = client.post(
+        "/chat",
+        json={
+            "message": SENSITIVE_MESSAGE,
+            "session_id": "S01",
+            "approval_request_id": pending.request_id,
+        },
+        headers=auth_headers(),
+    )
+
+    assert '"requires_human_review": true' in response.text
+
+
+def test_chat_stream_preserves_newlines_in_template_answers():
+    search = FakeSearchService()
+    agent = SmartShopAgent(
+        config=AgentConfig(top_k=1, use_llm_routing="never"),
+        search_tool=ProductSearchTool(search),
+    )
+    client = build_client(search=search, agent=agent)
+
+    response = client.post(
+        "/chat",
+        json={"message": "show me wireless headphones", "session_id": "S01"},
+        headers=auth_headers(),
+    )
+
+    # Reassembling the chunks must reproduce the multi-line product list.
+    # Splitting on whitespace (the old behaviour) silently dropped newlines.
+    chunks = [
+        json.loads(block.split("data:", 1)[1].strip())["content"]
+        for block in response.text.split("\n\n")
+        if "event: chunk" in block
+    ]
+    assert "\n" in "".join(chunks)
+    assert "Here are matching products:" in "".join(chunks)
+
+
+def test_chat_runs_through_the_langgraph_app():
+    pytest.importorskip("langgraph")
+    client = build_client(agent=review_agent())
+
+    response = client.post(
+        "/chat",
+        json={"message": "what is your shipping policy?", "session_id": "S01"},
+        headers=auth_headers(),
+    )
+
+    # The graph must be the live path, not dead code the API skips.
+    assert response.status_code == 200
+    assert client.app.state.agent_graph is not None
+    assert client.app.state.graph_unavailable is False
+    assert "3-5 business days" in response.text
+
+
+def test_chat_falls_back_to_direct_agent_when_graph_disabled():
+    cache = FakeCacheService()
+    config = APIConfig(
+        environment="test",
+        jwt_secret="test-secret",
+        agent_use_graph=False,
+    )
+    app = create_app(
+        cache_service=cache,
+        search_service=FakeSearchService(),
+        agent=review_agent(),
+        config=config,
+        etl_runner=FakeETLJobRunner(),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/chat",
+        json={"message": "what is your shipping policy?", "session_id": "S01"},
+        headers=auth_headers(),
+    )
+
+    # The slim runtime image has no langgraph; /chat must still answer.
+    assert response.status_code == 200
+    assert "3-5 business days" in response.text
+    assert app.state.agent_graph is None
+
+
+class FakeHotProductsStore:
+    def __init__(self, rows=None):
+        self.rows = rows or []
+
+    def top_products(self, limit=10):
+        return self.rows[:limit]
+
+
+class RankableSearchService:
+    """Returns two products so re-ranking is observable."""
+
+    def search_products(self, query, filters=None, top_k=5, category_filter=None):
+        return [
+            {"product_id": "P-low", "title": "Low", "price": 10.0, "score": 0.90},
+            {"product_id": "P-hot", "title": "Hot", "price": 20.0, "score": 0.80},
+        ]
+
+
+def test_hot_products_reads_the_click_leaderboard():
+    store = FakeHotProductsStore(
+        [
+            {"product_id": "P01", "click_count": 9},
+            {"product_id": "P02", "click_count": 3},
+        ]
+    )
+    client = build_client(hot_products_store=store)
+
+    response = client.get("/products/hot?limit=2", headers=auth_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "redis"
+    assert body["products"][0] == {"product_id": "P01", "click_count": 9}
+
+
+def test_hot_products_degrades_when_redis_is_absent():
+    import asyncio
+
+    from src.main import hot_products
+
+    # Called directly rather than over HTTP: create_app copies routes off the
+    # module-level app, so those routes resolve dependency_overrides against
+    # that app and overrides on a test app are ignored.
+    result = asyncio.run(hot_products(limit=10, hot_store=None, _rate_limit=None))
+
+    # Redis down must not fail the request; it reports no data instead.
+    assert result.source == "unavailable"
+    assert result.products == []
+
+
+def test_recommendations_degrade_to_similarity_when_redis_is_absent():
+    import asyncio
+
+    from src.main import recommendations
+
+    result = asyncio.run(
+        recommendations(
+            query="headphones",
+            search_service=RankableSearchService(),
+            hot_store=None,
+            _rate_limit=None,
+        )
+    )
+
+    assert result.strategy == "similarity"
+    assert [item.product_id for item in result.results] == ["P-low", "P-hot"]
+
+
+def test_recommendations_boost_popular_products():
+    store = FakeHotProductsStore([{"product_id": "P-hot", "click_count": 100}])
+    client = build_client(search=RankableSearchService(), hot_products_store=store)
+
+    response = client.get(
+        "/recommendations?query=headphones&top_k=2&popularity_weight=0.5",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["strategy"] == "hybrid"
+    # P-low has higher similarity (0.90 vs 0.80) but no clicks; with half the
+    # weight on popularity the clicked product must come first.
+    assert [item["product_id"] for item in body["results"]] == ["P-hot", "P-low"]
+    assert body["results"][0]["click_count"] == 100
+
+
+def test_recommendations_without_clicks_fall_back_to_similarity():
+    client = build_client(
+        search=RankableSearchService(), hot_products_store=FakeHotProductsStore([])
+    )
+
+    response = client.get("/recommendations?query=headphones", headers=auth_headers())
+
+    body = response.json()
+    assert body["strategy"] == "similarity"
+    assert [item["product_id"] for item in body["results"]] == ["P-low", "P-hot"]
+
+
+def test_recommendations_without_query_return_trending():
+    store = FakeHotProductsStore(
+        [
+            {"product_id": "P-a", "click_count": 5},
+            {"product_id": "P-b", "click_count": 2},
+        ]
+    )
+    client = build_client(search=RankableSearchService(), hot_products_store=store)
+
+    response = client.get("/recommendations?top_k=2", headers=auth_headers())
+
+    body = response.json()
+    assert body["strategy"] == "popularity"
+    assert [item["product_id"] for item in body["results"]] == ["P-a", "P-b"]
+
+
+def test_recommendations_reject_invalid_weight():
+    client = build_client(search=RankableSearchService())
+
+    response = client.get(
+        "/recommendations?query=x&popularity_weight=2", headers=auth_headers()
+    )
+
+    assert response.status_code == 422
 
 
 def test_approval_queue_can_be_listed_and_resolved():

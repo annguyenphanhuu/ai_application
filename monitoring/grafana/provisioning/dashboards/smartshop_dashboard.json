@@ -284,6 +284,27 @@
       ]
     },
     {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "The agent silently falls back to keyword routing when the LLM is unreachable or the API key is invalid. A collapse of the 'llm' series to zero while chat traffic continues means the agent is degraded, not healthy.",
+      "fieldConfig": {
+        "defaults": {"unit": "short", "color": {"mode": "palette-classic"}},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32},
+      "id": 19,
+      "options": {"tooltip": {"mode": "multi"}, "legend": {"displayMode": "list", "placement": "bottom"}},
+      "title": "Agent Routing Mode (LLM vs Rule-Based Fallback)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (mode) (rate(smartshop_agent_decisions_total[5m]))",
+          "legendFormat": "{{mode}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "collapsed": false,
       "gridPos": {"h": 1, "w": 24, "x": 0, "y": 32},
       "id": 104,

@@ -31,6 +31,9 @@ services:
       SMARTSHOP_ETL_SPARK_MASTER: ${SMARTSHOP_ETL_SPARK_MASTER:-local[*]}
       SMARTSHOP_ETL_COMMAND: ${SMARTSHOP_ETL_COMMAND:-}
       SMARTSHOP_AGENT_USE_LLM: ${SMARTSHOP_AGENT_USE_LLM:-auto}
+      # Run /chat through the compiled LangGraph app. Set to false to bypass
+      # the graph and call the agent directly.
+      SMARTSHOP_AGENT_USE_GRAPH: ${SMARTSHOP_AGENT_USE_GRAPH:-true}
       SMARTSHOP_OPENAI_MODEL: ${SMARTSHOP_OPENAI_MODEL:-o4-mini}
       SMARTSHOP_POLICY_SOURCE_PATH: /app/data/policies/smartshop_policy.md
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -195,6 +198,58 @@ services:
     restart: unless-stopped
 
   # -------------------------------------------------------------------------
+  # Phase 2: Airflow – runs dags/etl_scheduler.py.
+  #
+  # Behind the "airflow" profile because it is heavy and unrelated to the API
+  # stack; it does not start with a plain `docker compose up`:
+  #     docker compose --profile airflow up -d airflow
+  #     # UI http://localhost:8080, credentials printed in the logs
+  #
+  # `airflow standalone` uses SQLite + SequentialExecutor: fine for learning
+  # and for parsing/triggering the DAG, not a production deployment (that
+  # needs Postgres plus a real executor).
+  # -------------------------------------------------------------------------
+  airflow:
+    image: apache/airflow:2.9.3-python3.11
+    container_name: smartshop-airflow
+    profiles: ["airflow"]
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      # The DAG shells out to jobs/ scripts using this path.
+      AIRFLOW_VAR_WORKSPACE_PATH: /opt/project
+      AIRFLOW_VAR_ENVIRONMENT: local
+    volumes:
+      - ./dags:/opt/airflow/dags:ro
+      - ./jobs:/opt/project/jobs:ro
+      - ./src:/opt/project/src:ro
+      - ./data:/opt/project/data
+      - airflow-data:/opt/airflow
+    command: >
+      bash -c "airflow db migrate && airflow standalone"
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # Phase 10: Alertmanager – receives alerts fired by Prometheus rules.
+  # Without it the rules in alert_rules.yml evaluate but notify nobody.
+  # UI: http://localhost:9093
+  # -------------------------------------------------------------------------
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: smartshop-alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
   # Phase 10: Grafana – dashboard visualisation (http://localhost:3000)
   # Default credentials: admin / admin (change via GF_SECURITY_ADMIN_PASSWORD)
   # -------------------------------------------------------------------------
@@ -222,4 +277,6 @@ volumes:
   qdrant-data:
   kafka-data:
   prometheus-data:
+  alertmanager-data:
   grafana-data:
+  airflow-data:

@@ -1,0 +1,40 @@
+# Alertmanager routing for SmartShop.
+#
+# The default receiver is a no-op webhook so the local stack works with no
+# secrets: alerts become visible at http://localhost:9093 and in Prometheus's
+# Alerts tab. Swap in a real receiver (Slack, email, PagerDuty) per environment.
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default
+  # Group by alert so one noisy rule does not bury the others.
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Critical alerts page immediately and repeat more aggressively.
+    - matchers:
+        - severity = "critical"
+      receiver: critical
+      group_wait: 10s
+      repeat_interval: 1h
+
+receivers:
+  - name: default
+    # No notifier configured: alerts are still visible in the Alertmanager UI.
+    # Add e.g. slack_configs here.
+
+  - name: critical
+    # Same as default locally. In production point this at a real pager.
+
+inhibit_rules:
+  # If the whole API target is down, suppress the downstream symptom alerts it
+  # inevitably triggers.
+  - source_matchers:
+      - alertname = "ApiTargetDown"
+    target_matchers:
+      - severity =~ "warning|info"
+    equal: ["job"]

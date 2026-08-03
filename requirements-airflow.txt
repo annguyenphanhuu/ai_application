@@ -1,0 +1,13 @@
+# Phase 2 orchestration dependencies.
+#
+# Kept out of requirements.txt on purpose: Airflow pulls a large dependency
+# tree and pins versions that conflict with the MLflow/Spark stack used for
+# Phase 2/3. Install it into its own environment:
+#
+#   python -m venv .venv-airflow
+#   .venv-airflow/bin/pip install -r requirements-airflow.txt
+#
+# `dags/etl_scheduler.py` imports `airflow` at module level, so the DAG can
+# only be parsed where these are installed.
+apache-airflow>=2.9.0,<3.0.0
+apache-airflow-providers-databricks>=6.0.0

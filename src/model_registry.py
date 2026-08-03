@@ -126,12 +126,132 @@ def get_model_version_by_alias(client: Any, model_name: str, alias: str) -> Any:
     return client.get_model_version_by_alias(model_name, alias)
 
 
+class PromotionBlocked(RuntimeError):
+    """Raised when a candidate fails the quality gate against the champion."""
+
+
+def get_version_metric(client: Any, model_name: str, version: str | int, metric: str):
+    """Read one metric for a model version, preferring the run over the tag.
+
+    Metrics live on the MLflow run; ``train.py`` also copies them onto the
+    model version as ``metrics.<name>`` tags, so fall back to those when the
+    run is gone.
+    """
+    try:
+        model_version = client.get_model_version(model_name, str(version))
+    except Exception:  # noqa: BLE001
+        return None
+
+    run_id = getattr(model_version, "run_id", None)
+    if run_id:
+        try:
+            run = client.get_run(run_id)
+            value = run.data.metrics.get(metric)
+            if value is not None:
+                return float(value)
+        except Exception:  # noqa: BLE001
+            pass
+
+    tags = getattr(model_version, "tags", None) or {}
+    raw = tags.get(f"metrics.{metric}")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def check_promotion_gate(
+    client: Any,
+    model_name: str,
+    version: str | int,
+    alias: str = DEFAULT_CHAMPION_ALIAS,
+    metric: str = "f1_score",
+    min_delta: float = 0.0,
+) -> dict[str, Any]:
+    """Compare a candidate against the incumbent holder of *alias*.
+
+    Returns a report dict. Promotion is allowed when there is no incumbent
+    (first champion), or when the candidate's *metric* is at least the
+    incumbent's plus *min_delta*.
+
+    Without this, ``promote`` repointed production traffic unconditionally, so
+    a model trained on a bad batch could take over with one command.
+    """
+    report: dict[str, Any] = {
+        "metric": metric,
+        "min_delta": min_delta,
+        "candidate_version": str(version),
+        "candidate_metric": get_version_metric(client, model_name, version, metric),
+        "incumbent_version": None,
+        "incumbent_metric": None,
+        "allowed": True,
+        "reason": "",
+    }
+
+    try:
+        incumbent = get_model_version_by_alias(client, model_name, alias)
+    except Exception:  # noqa: BLE001
+        incumbent = None
+
+    if incumbent is None:
+        report["reason"] = f"No current '{alias}'; promoting the first version."
+        return report
+
+    incumbent_version = str(getattr(incumbent, "version", ""))
+    report["incumbent_version"] = incumbent_version
+    if incumbent_version == str(version):
+        report["reason"] = f"Version {version} already holds '{alias}'."
+        return report
+
+    report["incumbent_metric"] = get_version_metric(
+        client, model_name, incumbent_version, metric
+    )
+
+    candidate_metric = report["candidate_metric"]
+    incumbent_metric = report["incumbent_metric"]
+    if candidate_metric is None or incumbent_metric is None:
+        report["allowed"] = False
+        report["reason"] = (
+            f"Cannot compare '{metric}': candidate={candidate_metric}, "
+            f"incumbent={incumbent_metric}. Re-run training so the metric is "
+            f"logged, or pass --force to override."
+        )
+        return report
+
+    required = incumbent_metric + min_delta
+    if candidate_metric < required:
+        report["allowed"] = False
+        report["reason"] = (
+            f"Candidate {metric}={candidate_metric:.4f} is below the required "
+            f"{required:.4f} (incumbent {incumbent_metric:.4f} + "
+            f"min_delta {min_delta}). Promotion blocked."
+        )
+        return report
+
+    report["reason"] = (
+        f"Candidate {metric}={candidate_metric:.4f} >= required {required:.4f}."
+    )
+    return report
+
+
 def promote_model_version(
     client: Any,
     model_name: str,
     version: str | int,
     alias: str = DEFAULT_CHAMPION_ALIAS,
+    metric: str = "f1_score",
+    min_delta: float = 0.0,
+    force: bool = False,
 ) -> RegisteredVersion:
+    if not force:
+        gate = check_promotion_gate(
+            client, model_name, version, alias=alias, metric=metric, min_delta=min_delta
+        )
+        if not gate["allowed"]:
+            raise PromotionBlocked(gate["reason"])
+
     set_model_alias(client, model_name, alias, version)
     set_model_version_tags(
         client,
@@ -189,6 +309,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Promote the version currently pointed to by this alias.",
     )
     promote_parser.add_argument("--alias", default=DEFAULT_CHAMPION_ALIAS)
+    promote_parser.add_argument(
+        "--gate-metric",
+        default="f1_score",
+        help="Metric compared against the incumbent before promoting.",
+    )
+    promote_parser.add_argument(
+        "--min-delta",
+        type=float,
+        default=0.0,
+        help="Required improvement over the incumbent (default: no regression).",
+    )
+    promote_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Promote even if the quality gate fails.",
+    )
 
     return parser
 
@@ -207,7 +343,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             version = get_model_version_by_alias(
                 client, args.model_name, args.source_alias
             ).version
-        promoted = promote_model_version(client, args.model_name, version, args.alias)
+        gate = check_promotion_gate(
+            client,
+            args.model_name,
+            version,
+            alias=args.alias,
+            metric=args.gate_metric,
+            min_delta=args.min_delta,
+        )
+        print(f"Quality gate: {gate['reason']}")
+        if not gate["allowed"] and not args.force:
+            print("Promotion aborted. Re-run with --force to override.")
+            return 1
+
+        promoted = promote_model_version(
+            client,
+            args.model_name,
+            version,
+            args.alias,
+            metric=args.gate_metric,
+            min_delta=args.min_delta,
+            force=True,  # already evaluated above
+        )
         print(
             f"Promoted {promoted.name} version {promoted.version} "
             f"to alias '{args.alias}'."
