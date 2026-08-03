@@ -18,8 +18,14 @@ redis>=4.6.0
 kafka-python>=2.0.2
 langchain-core>=0.2.0
 langchain-openai>=0.1.0
+# Phase 7: the compiled conversation graph is the live /chat path, so it must
+# be present in the runtime image, not just in the dev environment. Pure
+# Python -- it does not drag in PyTorch.
+langgraph>=0.2.0,<2.0.0
 
 # Phase 10: Monitoring & Observability
 prometheus-fastapi-instrumentator>=6.1.0
 prometheus-client>=0.19.0
-langfuse>=2.0.0
+# v3 removed client.generation() and langfuse.decorators; src/monitoring.py
+# targets the v4 observation API (start_observation/propagate_attributes).
+langfuse>=4.0.0,<5.0.0
