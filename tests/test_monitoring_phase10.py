@@ -18,6 +18,8 @@ import time
 import types
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -254,6 +256,95 @@ class TestLangfuseTracer:
             mod = _fresh_monitoring()
             tracer = mod.LangfuseTracer()
             assert not tracer.is_enabled
+
+    def test_incompatible_sdk_disables_tracing(self, monkeypatch):
+        """A v2/v3 SDK has no start_observation and must not look healthy.
+
+        Regression guard: the module previously called the v2-only
+        ``client.generation()``. With langfuse v4 installed every call failed
+        and was swallowed, while ``is_enabled`` stayed True -- so a completely
+        dead tracer was indistinguishable from a working one.
+        """
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-x")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-x")
+
+        fake_module = types.ModuleType("langfuse")
+
+        class LegacyLangfuse:
+            def __init__(self, **kwargs):  # noqa: ARG002
+                pass
+
+            def generation(self, **kwargs):  # v2 API, no start_observation
+                raise AssertionError("v2 API must not be used")
+
+        fake_module.Langfuse = LegacyLangfuse
+
+        with patch.dict(sys.modules, {"langfuse": fake_module}):
+            mod = _fresh_monitoring()
+            tracer = mod.LangfuseTracer()
+            assert not tracer.is_enabled
+            assert "start_observation" in (tracer.last_error or "")
+
+    def test_log_generation_uses_v4_observation_api(self, monkeypatch):
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-x")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-x")
+
+        recorded = {}
+
+        class FakeGeneration:
+            def __init__(self):
+                self.ended = False
+
+            def end(self):
+                self.ended = True
+
+        generation = FakeGeneration()
+
+        class FakeLangfuse:
+            def __init__(self, **kwargs):  # noqa: ARG002
+                pass
+
+            def start_observation(self, **kwargs):
+                recorded.update(kwargs)
+                return generation
+
+        import contextlib
+
+        fake_module = types.ModuleType("langfuse")
+        fake_module.Langfuse = FakeLangfuse
+        fake_module.propagate_attributes = lambda **kw: contextlib.nullcontext()
+
+        with patch.dict(sys.modules, {"langfuse": fake_module}):
+            mod = _fresh_monitoring()
+            tracer = mod.LangfuseTracer()
+            sent = tracer.log_generation(
+                name="agent-llm-routing",
+                model="o4-mini",
+                latency_seconds=0.5,
+                prompt_tokens=10,
+                completion_tokens=4,
+                input_text="hi",
+                output_text="hello",
+            )
+
+        assert sent is True
+        assert tracer.last_error is None
+        assert recorded["as_type"] == "generation"
+        assert recorded["model"] == "o4-mini"
+        assert recorded["usage_details"] == {"input": 10, "output": 4, "total": 14}
+        # The span must be closed, otherwise nothing is exported.
+        assert generation.ended is True
+
+
+class TestInstalledLangfuseSdkSurface:
+    """Guards against an unpinned langfuse upgrade breaking tracing again."""
+
+    def test_installed_sdk_exposes_the_api_this_module_targets(self):
+        langfuse = pytest.importorskip("langfuse")
+
+        assert hasattr(langfuse.Langfuse, "start_observation")
+        assert hasattr(langfuse, "propagate_attributes")
+        assert hasattr(langfuse, "observe")
 
 
 # ---------------------------------------------------------------------------
